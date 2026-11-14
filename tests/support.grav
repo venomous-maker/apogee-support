@@ -1,0 +1,193 @@
+// apogee-support's tests: time zones against known offsets, Moment's parsing,
+// formatting, arithmetic, boundaries, comparisons and differences, intervals
+// and periods, collections, data paths, text and numbers.
+import "std"
+import "../src/all.grav"
+use apogee.*
+
+@Row class Person {
+    public name: string  public age: long  public city: string
+    constructor(name: string, age: long, city: string) { self.name = name; self.age = age; self.city = city }
+    fn initials() -> string { return Str.upper(self.name[..1]) }
+}
+
+fn people() -> Collection<Person> {
+    return collect([new Person("ada", 36, "Nairobi"), new Person("bob", 17, "Kampala"), new Person("cy", 52, "Nairobi"), new Person("dee", 25, "Arusha")])
+}
+
+test "time zones: offsets, abbreviations, DST rules past the table, gaps and overlaps" {
+    let ny = TimeZone.of("America/New_York")
+    assertEq("${ny.offsetAt(1700000000)} ${ny.abbreviationAt(1700000000)} ${ny.offsetAt(1720000000)} ${ny.abbreviationAt(1720000000)}", "-18000 EST -14400 EDT")
+    assertEq(ny.offsetAt(4118000000), -14400)                                        // 2100, from the POSIX rule
+    assertEq(TimeZone.of("Australia/Sydney").offsetAt(1700000000), 39600)           // southern summer
+    assertEq(TimeZone.of("Asia/Kathmandu").offsetAt(1700000000), 20700)
+    assertEq("${TimeZone.of("+05:30").offsetAt(0)} ${TimeZone.of("-0800").name} ${TimeZone.of("Z").name}", "19800 -08:00 UTC")
+    let gap = Civil.days(2024, 3, 10) * 86400 + 9000                                 // 02:30, skipped
+    assertEq(ny.toUnix(gap), 1710055800)                                             // 03:30 EDT
+    assertEq(ny.toUnix(Civil.days(2024, 11, 3) * 86400 + 5400), 1730611800)          // 01:30 twice: the first
+    let bad = ""
+    try { TimeZone.of("Mars/Olympus") } catch (e: ValueError) { bad = e.message() }
+    assertEq(Str.contains(bad, "unknown time zone"), true)
+    assertEq(TimeZone.names().contains("Africa/Nairobi"), true)
+    assertEq(TimeZone.of("Africa/Nairobi") == TimeZone.of("Africa/Nairobi"), true)   // loaded once
+    assertEq(Civil.date(Civil.days(-44, 3, 15))[0], -44)
+}
+
+test "moments: making, parsing ISO and relative English, formats" {
+    Moment.setTestNow(Moment.parse("2026-11-14 09:30:00", "Africa/Nairobi"))
+    let now = Moment.now("Africa/Nairobi")
+    assertEq(now.format("l, jS F Y g:i A T P"), "Saturday, 14th November 2026 9:30 AM EAT +03:00")
+    assertEq(now.format("D d M y H:i:s N w z W o t L U \\Y"), "Sat 14 Nov 26 09:30:00 6 6 317 46 2026 30 0 1794637800 Y")
+    let tz = "Africa/Nairobi"
+    assertEq(Moment.parse("tomorrow 9am", tz).toDateTimeString(), "2026-11-15 09:00:00")
+    assertEq(Moment.parse("next friday 17:00", tz).toDateTimeString(), "2026-11-20 17:00:00")
+    assertEq(Moment.parse("last monday", tz).toDateString(), "2026-11-09")
+    assertEq(Moment.parse("3 days ago", tz).toDateString(), "2026-11-11")
+    assertEq(Moment.parse("+2 weeks 3 days", tz).toDateString(), "2026-12-01")
+    assertEq(Moment.parse("last day of next month", tz).toDateString(), "2026-12-31")
+    assertEq(Moment.parse("first day of last month", tz).toDateString(), "2026-10-01")
+    assertEq(Moment.parse("monday next week", tz).toDateString(), "2026-11-16")
+    assertEq(Moment.parse("5th march 2027", tz).toDateString(), "2027-03-05")
+    assertEq(Moment.parse("March 5", tz).toDateString(), "2026-03-05")
+    assertEq(Moment.parse("noon", tz).toTimeString(), "12:00:00")
+    assertEq(Moment.parse("yesterday 11:15pm", tz).toDateTimeString(), "2026-11-13 23:15:00")
+    assertEq(Moment.parse("@0", "UTC").toDateTimeString(), "1970-01-01 00:00:00")
+    assertEq(Moment.parse("2026-11-14T09:30:15.25+03:00", tz).toJson(), "2026-11-14T06:30:15.250000Z")
+    assertEq(Moment.parse("2026-11-14 09:30 Europe/London", tz).format("H:i T"), "12:30 EAT")
+    assertEq(Moment.createFromFormat("d/m/Y H:i", "25/12/2026 18:45", tz).toIso8601String(), "2026-12-25T18:45:00+03:00")
+    assertEq(Moment.createFromFormat("!Y-m-d", "2026-02-01", tz).toDateTimeString(), "2026-02-01 00:00:00")
+    assertEq(Moment.createFromFormat("D, d M Y g:i a", "Fri, 25 Dec 2026 6:45 pm", tz).format("H:i"), "18:45")
+    assertEq(Moment.tryParse("not a date") == null && Moment.tryCreateFromFormat("Y-m-d", "2026-02-30") == null, true)
+    assertEq(Moment.parse("2024-03-10 02:30", "America/New_York").format("c T"), "2024-03-10T03:30:00-04:00 EDT")
+    assertEq(Moment.create(2026, 13, 1, 0, 0, 0, "UTC").toDateString(), "2027-01-01")   // rolls over
+    Moment.setTestNow(null)
+}
+
+test "moments: calendar arithmetic, boundaries, rounding, weekdays" {
+    let a = Moment.parse("2024-01-31 10:00", "UTC")
+    assertEq("${a.addMonths(1).toDateString()} ${a.addMonthsWithOverflow(1).toDateString()} ${a.addYears(1).toDateString()}", "2024-02-29 2024-03-02 2025-01-31")
+    let ny = Moment.parse("2024-03-09 12:00", "America/New_York")
+    assertEq("${ny.addDays(1).format("H:i T")} ${ny.addHours(24).format("H:i T")}", "12:00 EDT 13:00 EDT")   // a day is not 24 hours here
+    let m = Moment.parse("2026-11-14 09:38:20", "UTC")
+    assertEq("${m.startOfWeek().toDateString()} ${m.endOfWeek().toDateTimeString()} ${m.startOfMonth().toDateString()} ${m.endOfQuarter().toDateString()}", "2026-11-09 2026-11-15 23:59:59 2026-11-01 2026-12-31")
+    assertEq("${m.startOfYear().toDateString()} ${m.startOfDecade().year()} ${m.startOfCentury().year()} ${m.startOf("hour").toTimeString()}", "2026-01-01 2020 2001 09:00:00")
+    assertEq("${m.floor("minute", 15).toTimeString()} ${m.round("minute", 15).toTimeString()} ${m.ceil("hour").toTimeString()}", "09:30:00 09:45:00 10:00:00")
+    assertEq("${m.next(1).toDateString()} ${m.previous(5).toDateString()} ${m.nthOfMonth(2, 2).toDateString()} ${m.lastOfMonth(5).toDateString()}", "2026-11-16 2026-11-13 2026-11-10 2026-11-27")
+    assertEq("${m.addWeekdays(3).toDateString()} ${m.subWeekdays(1).toDateString()} ${m.nextWeekendDay().toDateString()}", "2026-11-18 2026-11-13 2026-11-15")
+    assertEq("${m.add(90, "minutes").toTimeString()} ${m.sub(1, "quarter").toDateString()} ${m.setTime(23, 5).toTimeString()} ${m.set("month", 2).toDateString()}", "11:08:20 2026-08-14 23:05:00 2026-02-14")
+    assertEq("${m.isoWeek()} ${Moment.parse("2027-01-01", "UTC").isoWeek()} ${Moment.parse("2027-01-01", "UTC").isoWeekYear()} ${m.weekOfMonth()} ${m.weekNumberInMonth()} ${m.quarter()} ${m.daysInMonth()}", "46 53 2026 2 3 4 30")
+    assertEq(m.tz("Africa/Nairobi").format("H:i e"), "12:38 Africa/Nairobi")
+    assertEq(m.shiftTimezone("Africa/Nairobi").utc().format("H:i"), "06:38")
+    assertEq(m.plus(Interval.parse("1 month 2 days 3 hours")).toDateTimeString(), "2026-12-16 12:38:20")
+}
+
+test "moments: comparing, differences, for humans" {
+    Moment.setTestNow(Moment.parse("2026-11-14 09:30:00", "UTC"))
+    let now = Moment.now("UTC")
+    let later = now.addDays(10).addHours(2)
+    assertEq("${later > now} ${later.gt(now)} ${now.between(now.subDay(), later)} ${now.isSameDay(now.setTime(1))} ${now.isWeekend()} ${now.isSaturday()}", "true true true true true true")
+    assertEq("${now.addDay().isTomorrow()} ${now.subDay().isYesterday()} ${now.isToday()} ${later.isFuture()} ${now.subSecond().isPast()} ${now.isCurrentMonth()}", "true true true true true true")
+    assertEq("${now.diffInDays(later)} ${later.diffInDays(now, false)} ${now.diffInHours(later)} ${now.diffInWeekdays(later)} ${now.diffInMonths(now.addMonths(14))} ${now.diffInYears(now.addMonths(14))}", "10 -10 242 6 14 1")
+    assertEq(Moment.parse("2024-03-09 12:00", "America/New_York").diffInDays(Moment.parse("2024-03-10 12:00", "America/New_York")), 1)
+    assertEq(Moment.parse("2024-01-31 10:00", "UTC").diff(Moment.parse("2026-03-15 12:30:05", "UTC")).forHumans(), "2 years 1 month 2 weeks 1 day 2 hours 30 minutes 5 seconds")
+    assertEq("${now.subDays(3).diffForHumans()}|${now.addHours(5).diffForHumans()}|${now.diffForHumans()}|${now.subMinutes(2).diffForHumans(now.addMinutes(1))}", "3 days ago|in 5 hours|just now|3 minutes before")
+    assertEq("${now.subYears(2).subMonths(3).diffForHumans(null, false, false, 2)}|${now.subDays(9).diffForHumans(null, true, true)}", "2 years 3 months ago|1w")
+    assertEq("${now.calendar()}|${now.subDay().calendar()}|${now.addDays(3).calendar()}", "Today at 9:30 AM|Yesterday at 9:30 AM|Tuesday at 9:30 AM")
+    assertEq(Moment.earliest([later, now, now.addDay()]) == now, true)
+    assertEq(now.closest(now.addDays(2), now.subDay()) == now.subDay(), true)
+    Moment.travel(5, "minutes")
+    assertEq(Moment.now("UTC").toTimeString(), "09:35:00")
+    Moment.travelBack()
+    assertEq(Moment.hasTestNow(), false)
+}
+
+test "intervals and periods" {
+    assertEq(Interval.parse("PT90M").cascade().forHumans(), "1 hour 30 minutes")
+    assertEq("${Interval.parse("1h30m").toIso()} ${Interval.parse("P1Y2M10DT2H30M").forHumans(true)} ${Interval.parse("2 days 3 hours").totalHours()}", "PT1H30M 1y 2mo 1w 3d 2h 30m 51")
+    assertEq("${Interval.parse("-1 day").isNegative()} ${Interval.ofMinutes(5).toDuration().ms} ${Interval.parse("1.5 hours").totalMinutes()} ${Interval.make(3, "weeks").days}", "true 300000 90 21")
+    assertEq(Interval.ofHours(2) > Interval.ofMinutes(90), true)
+    assertEq(Interval.tryParse("soon") == null, true)
+    let weeks = Period.create("2026-11-01", "2026-11-30", "1 week", "UTC")
+    assertEq("${weeks.count()} ${weeks.last().toDateString()}", "5 2026-11-29")
+    assertEq(Period.create("2026-11-01", "2026-11-07", "1 day", "UTC").weekdays().count(), 5)
+    assertEq(Period.create("2026-11-01", "2026-11-03", "1 day", "UTC").excludeStart().excludeEnd().count(), 1)
+    let months = Period.times(Moment.parse("2026-01-31", "UTC"), 3, Interval.ofMonths(1)).toArray()
+    assertEq(collect(months).map(fn(m: Moment) -> string { return m.toDateString() }).join(","), "2026-01-31,2026-02-28,2026-03-31")   // no drift
+}
+
+test "collections: transforming, filtering by field, grouping, ordering, numbers" {
+    let p = people()
+    assertEq(p.filter(fn(x: Person) -> bool { return x.age >= 18 }).sortByDesc(fn(x: Person) -> double { return x.age as double }).map(fn(x: Person) -> string { return x.name }).join(", ", " and "), "cy, ada and dee")
+    assertEq(p.where("city", "Nairobi").pluckText("name").join(","), "ada,cy")
+    assertEq(p.whereOp("age", ">=", 25).pluckText("initials").join(""), "ACD")
+    assertEq("${p.whereIn("city", ["Kampala", "Arusha"]).count()} ${p.whereOp("name", "like", "%d%").count()} ${p.whereBetween("age", 20, 40).count()}", "2 2 2")
+    let byCity = p.groupBy(fn(x: Person) -> string { return x.city })
+    assertEq("${byCity["Nairobi"].count()} ${Str.join(p.groupKeys(fn(x: Person) -> string { return x.city }), ",")}", "2 Nairobi,Kampala,Arusha")
+    assertEq(p.countBy(fn(x: Person) -> string { return x.city })["Nairobi"], 2)
+    assertEq("${p.sumOf("age")} ${p.avg(fn(x: Person) -> double { return x.age as double })} ${p.median(fn(x: Person) -> double { return x.age as double })} ${p.maxBy(fn(x: Person) -> double { return x.age as double }).name}", "130 32.5 30.5 cy")
+    assertEq(p.sortByKeys(["city", "-age"]).pluckText("name").join(","), "dee,bob,cy,ada")
+    assertEq(p.sortByText(fn(x: Person) -> string { return x.name }, true).first().name, "dee")
+    assertEq(p.keyBy(fn(x: Person) -> string { return x.name })["bob"].age, 17)
+    let parts = p.partition(fn(x: Person) -> bool { return x.age < 30 })
+    assertEq("${parts[0].count()} ${parts[1].count()}", "2 2")
+    assertEq(p.firstWhere(fn(x: Person) -> bool { return x.city == "Arusha" }).name, "dee")
+    let missing = ""
+    try { p.sole(fn(x: Person) -> bool { return x.city == "Nairobi" }) } catch (e: ItemNotFoundException) { missing = e.message() }
+    assertEq(missing, "more than one item matches")
+    let n = collect([1, 2, 3, 4, 5])
+    assertEq(collect(n.chunk(2)).map(fn(c: Collection<int>) -> string { return c.join("+") }).join(" "), "1+2 3+4 5")
+    assertEq("${n.sliding(3).size()} ${n.split(2).size()} ${n.take(-2).all()} ${n.skip(3).all()} ${n.nth(2).all()} ${n.forPage(2, 2).all()}", "3 2 [4, 5] [4, 5] [1, 3, 5] [3, 4]")
+    assertEq("${n.takeWhile(fn(x: int) -> bool { return x < 3 }).all()} ${n.skipUntil(fn(x: int) -> bool { return x == 4 }).all()} ${n.pad(7, 0).all()}", "[1, 2] [4, 5] [1, 2, 3, 4, 5, 0, 0]")
+    assertEq("${n.total()} ${n.average()} ${n.percentile(50.0, fn(x: int) -> double { return x as double })} ${n.reduce(fn(acc: int, x: int) -> int { return acc * x }, 1)}", "15 3 3 120")
+    assertEq("${collect([1, 1, 2, 3, 3]).distinct().all()} ${collect([3, 1, 2]).sort(fn(a: int, b: int) -> int { return a - b }).all()} ${n.reverse().first()} ${n.shuffle().count()}", "[1, 2, 3] [1, 2, 3] 5 5")
+    assertEq("${n.diff(collect([2, 4])).all()} ${n.intersect(collect([2, 4, 9])).all()} ${n.zip(collect(["a", "b"])).size()} ${n.every(fn(x: int) -> bool { return x > 0 })}", "[1, 3, 5] [2, 4] 2 true")
+    assertEq(Str.join(collect(["a", "b", "a"]).mode(fn(s: string) -> string { return s }), ","), "a")
+    let m = collect([1, 2]).push(3).prepend(0)
+    assertEq(m.join(","), "0,1,2,3")
+    assertEq("${m.pop()} ${m.shift()} ${m.join(",")}", "3 0 1,2")
+    assertEq(Collection<int>.times(3, fn(i: int) -> int { return i * i }).join(","), "1,4,9")
+}
+
+test "data paths and Arr" {
+    let d: HashMap<string, any> = {"user": {"name": "Ada", "tags": ["a", "b"], "posts": [{"t": 1}, {"t": 2}]}}
+    assertEq("${Data.get(d, "user.name")} ${Data.get(d, "user.tags.1")} ${Data.get(d, "user.posts.*.t")} ${Data.get(d, "user.nope.x") == null}", "Ada b [1, 2] true")
+    assertEq(Data.get(new Person("ada", 1, "x"), "initials"), "A")
+    let flat = Arr.dot(d)
+    assertEq("${flat.containsKey("user.name")} ${Arr.get(Arr.undot(flat), "user.name")}", "true Ada")
+    Arr.set(d, "user.address.city", "Nairobi")
+    assertEq("${Arr.has(d, "user.address.city")} ${Arr.forget(d, "user.address.city")} ${Arr.has(d, "user.address.city")}", "true true false")
+    assertEq(Str.join(Arr.only({"a": 1, "b": 2} as HashMap<string, any>, ["a"]).keys(), ","), "a")
+    assertEq(Str.join(Arr.except({"a": 1, "b": 2} as HashMap<string, any>, ["a"]).keys(), ","), "b")
+    assertEq(Arr.flatten([1, [2, [3, 4]]]).size(), 4)
+    assertEq(Arr.query({"q": "a b", "page": 2} as HashMap<string, any>), "page=2&q=a%20b")
+    assertEq("${Data.same(1, "1")} ${Data.same(1, 1.0)} ${Data.same("a", 0)} ${Data.compare(5, "in", [1, 5])}", "true true false true")
+}
+
+test "text: cases, slugs, plurals, cutting, tests, making" {
+    assertEq("${Text.camel("user_profile id")} ${Text.studly("user-profile")} ${Text.snake("UserProfileId")} ${Text.kebab("userProfile")} ${Text.headline("EmailNotificationSent")}", "userProfileId UserProfile user_profile_id user-profile Email Notification Sent")
+    assertEq(Text.slug("Héllo Wörld, 2026 & more!"), "hello-world-2026-and-more")
+    assertEq(Text.ascii("Ångström café"), "Angstrom cafe")
+    assertEq("${Text.plural("person")} ${Text.plural("category")} ${Text.plural("box")} ${Text.plural("child", 1)} ${Text.plural("sheep")} ${Text.plural("Wolf")} ${Text.plural("blog_post")} ${Text.plural("quiz")}", "people categories boxes child sheep Wolves blog_posts quizzes")
+    assertEq("${Text.singular("people")} ${Text.singular("categories")} ${Text.singular("boxes")} ${Text.singular("Statuses")} ${Text.singular("users")} ${Text.singular("analyses")} ${Text.pluralStudly("UserProfile")} ${Text.pluralize(3, "item")}", "person category box Status user analysis UserProfiles 3 items")
+    assertEq("${Text.limit("Hello world", 8)}|${Text.limit("Hello world again", 13, "…", true)}|${Text.wordsLimit("one two three four", 2)}", "Hello wo...|Hello world…|one two...")
+    assertEq("${Text.mask("ada@example.com", "*", 3)} ${Text.mask("0712345678", "*", -4, 3)}", "ada************ 071234***8")
+    assertEq("${Text.between("[a] [b]", "[", "]")} ${Text.betweenFirst("[a] [b]", "[", "]")} ${Text.afterLast("app.Models.User", ".")} ${Text.start("path", "/")} ${Text.finish("dir//", "/")}", "a] [b a User /path dir/")
+    assertEq("${Text.is("admin/*", "admin/users")} ${Text.is("*.grav", "a.go")} ${Text.isUrl("https://x.io/a")} ${Text.isUuid(Text.uuid())} ${Text.isUlid(Text.ulid())} ${Text.isJson("{\"a\":1}")}", "true false true true true true")
+    assertEq("${Text.squish("  a   b \n c ")} ${Text.replaceArray("?", ["8:30", "9:00"], "between ? and ?")} ${Text.swap({"Tacos": "Burritos", "great": "fantastic"}, "Tacos are great")}", "a b c between 8:30 and 9:00 Burritos are fantastic")
+    assertEq("${Text.padBoth("x", 5, "-")} ${Text.padLeft("7", 3, "0")} ${Text.excerpt("This is my name", "my", 3)} ${Text.length("héllo")}", "--x-- 007 ...is my na... 5")
+    assertEq("${Text.random(24).length} ${Text.password(16).length} ${Text.ulid() < Text.ulid() || true} ${Text.orderedUuid().length}", "24 16 true 36")
+    assertEq(Text.of("  user profile ").trim().studly().pluralStudly().toString(), "UserProfiles")
+    assertEq(Text.of("Hello").append(" world").slug("_").upper().toString(), "HELLO_WORLD")
+}
+
+test "numbers for people" {
+    assertEq("${Number.format(1234567.891, 2)} ${Number.format(1234.5)} ${Number.format(3.10, 0, 2)} ${Number.format(-0.4)}", "1,234,567.89 1,235 3.1 0")
+    assertEq("${Number.percentage(45.6)} ${Number.percentage(45.65, 1)} ${Number.currency(1250, "KES")} ${Number.currency(-9.5)}", "46% 45.7% KES 1,250.00 -$9.50")
+    assertEq("${Number.fileSize(512)} ${Number.fileSize(3500000)} ${Number.fileSize(1073741824)}", "512 B 3.34 MB 1 GB")
+    assertEq("${Number.abbreviate(1200)} ${Number.abbreviate(3500000)} ${Number.forHumans(2300000000.0)} ${Number.abbreviate(999)}", "1.2K 3.5M 2.3 billion 999")
+    assertEq("${Number.ordinal(1)} ${Number.ordinal(12)} ${Number.ordinal(22)} ${Number.ordinal(103)}", "1st 12th 22nd 103rd")
+    assertEq(Number.spell(105), "one hundred and five")
+    assertEq(Number.spell(2026), "two thousand and twenty-six")
+    assertEq(Number.spell(1000001), "one million and one")
+    assertEq("${Number.clamp(15.0, 0.0, 10.0)} ${Number.pairs(25, 10)}", "10 [[1, 10], [11, 20], [21, 25]]")
+}
