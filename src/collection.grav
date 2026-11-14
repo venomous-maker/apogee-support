@@ -199,9 +199,8 @@ namespace apogee {
             for (x in self.items) { if (f(x)) { yes.push(x); } else { no.push(x); } }
             return [new Collection<T>(yes), new Collection<T>(no)];
         }
-        // (these four return arrays: a Collection<Collection<T>> would have a chunk()
-        // of its own returning one more level, and so on without end)
-        fn chunk(size: int) -> Array<Collection<T>> {
+        // Groups of `size` items (the last may be shorter).
+        fn chunk(size: int) -> Collection<Collection<T>> {
             if (size < 1) { throw new ValueError("chunk size must be at least 1"); }
             let out = new Array<Collection<T>>();
             let i = 0;
@@ -210,10 +209,10 @@ namespace apogee {
                 out.push(new Collection<T>(self.items.slice(i, end)));
                 i = end;
             }
-            return out;
+            return new Collection<Collection<T>>(out);
         }
         // Consecutive items kept together while f(item, chunk so far) holds.
-        fn chunkWhile(f: fn(T, Collection<T>) -> bool) -> Array<Collection<T>> {
+        fn chunkWhile(f: fn(T, Collection<T>) -> bool) -> Collection<Collection<T>> {
             let out = new Array<Collection<T>>();
             let cur = new Collection<T>(new Array<T>());
             for (x in self.items) {
@@ -221,17 +220,17 @@ namespace apogee {
                 cur.items.push(x);
             }
             if (cur.items.size() > 0) { out.push(cur); }
-            return out;
+            return new Collection<Collection<T>>(out);
         }
         // Windows of `size` items, `step` apart: sliding(2) of [1,2,3] is [[1,2],[2,3]].
-        fn sliding(size: int = 2, step: int = 1) -> Array<Collection<T>> {
+        fn sliding(size: int = 2, step: int = 1) -> Collection<Collection<T>> {
             let out = new Array<Collection<T>>();
             let i = 0;
             while (i + size <= self.items.size()) { out.push(new Collection<T>(self.items.slice(i, i + size))); i += step; }
-            return out;
+            return new Collection<Collection<T>>(out);
         }
         // Into `groups` collections as even as possible.
-        fn split(groups: int) -> Array<Collection<T>> {
+        fn split(groups: int) -> Collection<Collection<T>> {
             let out = new Array<Collection<T>>();
             let n = self.items.size();
             let at = 0;
@@ -241,7 +240,7 @@ namespace apogee {
                 out.push(new Collection<T>(self.items.slice(at, at + len)));
                 at += len;
             }
-            return out;
+            return new Collection<Collection<T>>(out);
         }
 
         // ── order ───────────────────────────────────────────────────────────────

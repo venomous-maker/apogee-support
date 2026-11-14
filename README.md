@@ -218,7 +218,7 @@ collection. `push`, `prepend`, `pop`, `shift`, `forget`, `splice` and
   - `groupBy`, `keyBy`, `countBy`, `partition`
   - `groupKeys` lists the keys in the order they first appear.
 - **Splitting:** `chunk`, `chunkWhile`, `sliding` and `split`, which return
-  arrays of collections.
+  a collection of collections, as Laravel's do.
 - **Order:**
   - `sortBy` and `sortByDesc` work out each item's key once, not once per
     comparison, and are stable.

@@ -135,7 +135,8 @@ test "collections: transforming, filtering by field, grouping, ordering, numbers
     try { p.sole(fn(x: Person) -> bool { return x.city == "Nairobi" }) } catch (e: ItemNotFoundException) { missing = e.message() }
     assertEq(missing, "more than one item matches")
     let n = collect([1, 2, 3, 4, 5])
-    assertEq(collect(n.chunk(2)).map(fn(c: Collection<int>) -> string { return c.join("+") }).join(" "), "1+2 3+4 5")
+    assertEq(n.chunk(2).map(fn(c: Collection<int>) -> string { return c.join("+") }).join(" "), "1+2 3+4 5")
+    assertEq("${n.chunk(2).chunk(2).count()} ${n.chunk(2).first().all()} ${n.sliding(2).last().all()}", "2 [1, 2] [4, 5]")   // (collections of collections)
     assertEq("${n.sliding(3).size()} ${n.split(2).size()} ${n.take(-2).all()} ${n.skip(3).all()} ${n.nth(2).all()} ${n.forPage(2, 2).all()}", "3 2 [4, 5] [4, 5] [1, 3, 5] [3, 4]")
     assertEq("${n.takeWhile(fn(x: int) -> bool { return x < 3 }).all()} ${n.skipUntil(fn(x: int) -> bool { return x == 4 }).all()} ${n.pad(7, 0).all()}", "[1, 2] [4, 5] [1, 2, 3, 4, 5, 0, 0]")
     assertEq("${n.total()} ${n.average()} ${n.percentile(50.0, fn(x: int) -> double { return x as double })} ${n.reduce(fn(acc: int, x: int) -> int { return acc * x }, 1)}", "15 3 3 120")
