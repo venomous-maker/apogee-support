@@ -1,0 +1,694 @@
+// collection.grav — Collection<T>: Laravel's collections, typed. Chained
+// transformations over an array, each making a new collection (push, pop,
+// shift, prepend and transform change it in place, as Laravel's do), plus
+// Data (dotted paths into maps, arrays and objects) and Arr (helpers for
+// HashMap<string, any>).
+//
+//   collect(users)
+//       .filter(fn(u: User) -> bool { return u.active })
+//       .sortByDesc(fn(u: User) -> double { return u.score as double })
+//       .take(10)
+//       .map(fn(u: User) -> string { return u.name })
+//       .join(", ", " and ")
+//
+//   collect(orders).groupBy(fn(o: Order) -> string { return o.status })      // HashMap<string, Collection<Order>>
+//   collect(rows).where("country", "KE").pluck("email")                       // by field name, through reflection
+import "std"
+import "std/net"
+import "moment.grav"
+
+namespace apogee {
+
+    // first()/sole() found nothing (or, for sole(), more than one).
+    class ItemNotFoundException extends Exception {
+        constructor(message: string) { super(message); }
+        public fn kind() -> string { return "ItemNotFoundException"; }
+    }
+
+    // A collection of `items`.
+    fn collect<T>(items: Array<T>) -> Collection<T> { return new Collection<T>(items); }
+
+    class Collection<T> implements Jsonable {
+        public items: Array<T>
+
+        constructor(items: Array<T>) { self.items = items; }
+        static fn empty() -> Collection<T> { return new Collection<T>(new Array<T>()); }
+        // f(1) … f(n).
+        static fn times(n: int, f: fn(int) -> T) -> Collection<T> {
+            let out = new Array<T>();
+            for (i in 1..=n) { out.push(f(i)); }
+            return new Collection<T>(out);
+        }
+
+        // ── reading ─────────────────────────────────────────────────────────────
+        fn all() -> Array<T> { return self.items; }
+        fn toArray() -> Array<T> { return self.items.copy(); }
+        fn count() -> int { return self.items.size(); }
+        fn size() -> int { return self.items.size(); }
+        fn isEmpty() -> bool { return self.items.size() == 0; }
+        fn isNotEmpty() -> bool { return self.items.size() > 0; }
+        fn get(i: int) -> T { return self.items[i < 0 ? self.items.size() + i : i]; }
+        fn has(i: int) -> bool { return i >= 0 && i < self.items.size(); }
+        // The first item (ItemNotFoundException when empty).
+        fn first() -> T {
+            if (self.items.size() == 0) { throw new ItemNotFoundException("the collection is empty"); }
+            return self.items[0];
+        }
+        // The first item `f` accepts (ItemNotFoundException when none).
+        fn firstWhere(f: fn(T) -> bool) -> T {
+            for (x in self.items) { if (f(x)) { return x; } }
+            throw new ItemNotFoundException("no item matches");
+        }
+        fn firstOr(fallback: T) -> T { return self.items.size() > 0 ? self.items[0] : fallback; }
+        fn firstWhereOr(f: fn(T) -> bool, fallback: T) -> T {
+            for (x in self.items) { if (f(x)) { return x; } }
+            return fallback;
+        }
+        fn last() -> T {
+            if (self.items.size() == 0) { throw new ItemNotFoundException("the collection is empty"); }
+            return self.items[self.items.size() - 1];
+        }
+        fn lastWhere(f: fn(T) -> bool) -> T {
+            for (i in self.items.size() - 1..=0 step -1) { if (f(self.items[i])) { return self.items[i]; } }
+            throw new ItemNotFoundException("no item matches");
+        }
+        fn lastOr(fallback: T) -> T { return self.items.size() > 0 ? self.items[self.items.size() - 1] : fallback; }
+        // The one item `f` accepts: ItemNotFoundException for none, or for more than one.
+        fn sole(f: fn(T) -> bool) -> T {
+            let found = new Array<T>();
+            for (x in self.items) { if (f(x)) { found.push(x); if (found.size() > 1) { break; } } }
+            if (found.size() != 1) { throw new ItemNotFoundException(found.size() == 0 ? "no item matches" : "more than one item matches"); }
+            return found[0];
+        }
+        // The index of the first item `f` accepts, -1 for none.
+        fn search(f: fn(T) -> bool) -> int {
+            for (i in 0..self.items.size()) { if (f(self.items[i])) { return i; } }
+            return -1;
+        }
+        fn indexOf(item: T) -> int { return self.items.indexOf(item); }
+        fn includes(item: T) -> bool { return self.items.contains(item); }
+        fn contains(f: fn(T) -> bool) -> bool { return self.search(f) >= 0; }
+        fn some(f: fn(T) -> bool) -> bool { return self.search(f) >= 0; }
+        fn doesntContain(f: fn(T) -> bool) -> bool { return self.search(f) < 0; }
+        fn every(f: fn(T) -> bool) -> bool {
+            for (x in self.items) { if (!f(x)) { return false; } }
+            return true;
+        }
+        // Every `step`th item, from `offset`.
+        fn nth(step: int, offset: int = 0) -> Collection<T> {
+            let out = new Array<T>();
+            let i = offset;
+            while (i < self.items.size()) { out.push(self.items[i]); i += step; }
+            return new Collection<T>(out);
+        }
+
+        // ── transforming ────────────────────────────────────────────────────────
+        fn map<U>(f: fn(T) -> U) -> Collection<U> {
+            let out = new Array<U>();
+            out.reserve(self.items.size());
+            for (x in self.items) { out.push(f(x)); }
+            return new Collection<U>(out);
+        }
+        fn mapIndexed<U>(f: fn(T, int) -> U) -> Collection<U> {
+            let out = new Array<U>();
+            out.reserve(self.items.size());
+            for (i, x in self.items) { out.push(f(x, i)); }
+            return new Collection<U>(out);
+        }
+        fn flatMap<U>(f: fn(T) -> Array<U>) -> Collection<U> {
+            let out = new Array<U>();
+            for (x in self.items) { out.addAll(f(x)); }
+            return new Collection<U>(out);
+        }
+        // Replaces every item with f(item), in place.
+        fn transform(f: fn(T) -> T) -> Collection<T> {
+            for (i in 0..self.items.size()) { self.items[i] = f(self.items[i]); }
+            return self;
+        }
+        fn filter(f: fn(T) -> bool) -> Collection<T> {
+            let out = new Array<T>();
+            for (x in self.items) { if (f(x)) { out.push(x); } }
+            return new Collection<T>(out);
+        }
+        fn reject(f: fn(T) -> bool) -> Collection<T> {
+            let out = new Array<T>();
+            for (x in self.items) { if (!f(x)) { out.push(x); } }
+            return new Collection<T>(out);
+        }
+        // Items whose `key` (a field, getter, map key or dotted path) equals `value`.
+        fn where(key: string, value: any) -> Collection<T> { return self.whereOp(key, "=", value); }
+        // where("age", ">=", 18): = == != <> < <= > >= like ("%ada%"), in/not in (an Array<any>).
+        fn whereOp(key: string, op: string, value: any) -> Collection<T> {
+            let out = new Array<T>();
+            for (x in self.items) { if (Data.compare(Data.get(x as any, key), op, value)) { out.push(x); } }
+            return new Collection<T>(out);
+        }
+        fn whereIn(key: string, values: Array<any>) -> Collection<T> { return self.whereOp(key, "in", values); }
+        fn whereNotIn(key: string, values: Array<any>) -> Collection<T> { return self.whereOp(key, "not in", values); }
+        fn whereNull(key: string) -> Collection<T> { return self.filter(fn(x: T) -> bool { return Data.get(x as any, key) == null; }); }
+        fn whereNotNull(key: string) -> Collection<T> { return self.filter(fn(x: T) -> bool { return Data.get(x as any, key) != null; }); }
+        fn whereBetween(key: string, low: any, high: any) -> Collection<T> {
+            return self.filter(fn(x: T) -> bool { let v = Data.get(x as any, key); return Data.compare(v, ">=", low) && Data.compare(v, "<=", high); });
+        }
+        // Each item's `key` (Collection<any>): pluck("email").
+        fn pluck(key: string) -> Collection<any> { return self.map(fn(x: T) -> any { return Data.get(x as any, key); }); }
+        // Each item's `key` as text.
+        fn pluckText(key: string) -> Collection<string> { return self.map(fn(x: T) -> string { let v = Data.get(x as any, key); return v == null ? "" : str(v); }); }
+        fn reduce<U>(f: fn(U, T) -> U, initial: U) -> U {
+            let acc = initial;
+            for (x in self.items) { acc = f(acc, x); }
+            return acc;
+        }
+        fn each(f: fn(T)) -> Collection<T> { for (x in self.items) { f(x); } return self; }
+        fn eachIndexed(f: fn(T, int)) -> Collection<T> { for (i, x in self.items) { f(x, i); } return self; }
+        // Stops at the first item `f` returns false for.
+        fn eachWhile(f: fn(T) -> bool) -> Collection<T> { for (x in self.items) { if (!f(x)) { break; } } return self; }
+
+        // ── keys and groups ─────────────────────────────────────────────────────
+        fn keyBy(f: fn(T) -> string) -> HashMap<string, T> {
+            let m = new HashMap<string, T>();
+            for (x in self.items) { m.put(f(x), x); }
+            return m;
+        }
+        fn groupBy(f: fn(T) -> string) -> HashMap<string, Collection<T>> {
+            let m = new HashMap<string, Collection<T>>();
+            for (x in self.items) {
+                let k = f(x);
+                let g = m.getOr(k, null);
+                if (g == null) { g = new Collection<T>(new Array<T>()); m.put(k, g); }
+                g.items.push(x);
+            }
+            return m;
+        }
+        // The groups in the order their keys first appear.
+        fn groupKeys(f: fn(T) -> string) -> Array<string> {
+            let seen = new HashSet<string>();
+            let out = new Array<string>();
+            for (x in self.items) { let k = f(x); if (!seen.contains(k)) { seen.add(k); out.push(k); } }
+            return out;
+        }
+        fn countBy(f: fn(T) -> string) -> HashMap<string, int> {
+            let m = new HashMap<string, int>();
+            for (x in self.items) { let k = f(x); m.put(k, m.getOr(k, 0) + 1); }
+            return m;
+        }
+        // [the items `f` accepts, the rest].
+        fn partition(f: fn(T) -> bool) -> Array<Collection<T>> {
+            let yes = new Array<T>();
+            let no = new Array<T>();
+            for (x in self.items) { if (f(x)) { yes.push(x); } else { no.push(x); } }
+            return [new Collection<T>(yes), new Collection<T>(no)];
+        }
+        // (these four return arrays: a Collection<Collection<T>> would have a chunk()
+        // of its own returning one more level, and so on without end)
+        fn chunk(size: int) -> Array<Collection<T>> {
+            if (size < 1) { throw new ValueError("chunk size must be at least 1"); }
+            let out = new Array<Collection<T>>();
+            let i = 0;
+            while (i < self.items.size()) {
+                let end = i + size > self.items.size() ? self.items.size() : i + size;
+                out.push(new Collection<T>(self.items.slice(i, end)));
+                i = end;
+            }
+            return out;
+        }
+        // Consecutive items kept together while f(item, chunk so far) holds.
+        fn chunkWhile(f: fn(T, Collection<T>) -> bool) -> Array<Collection<T>> {
+            let out = new Array<Collection<T>>();
+            let cur = new Collection<T>(new Array<T>());
+            for (x in self.items) {
+                if (cur.items.size() > 0 && !f(x, cur)) { out.push(cur); cur = new Collection<T>(new Array<T>()); }
+                cur.items.push(x);
+            }
+            if (cur.items.size() > 0) { out.push(cur); }
+            return out;
+        }
+        // Windows of `size` items, `step` apart: sliding(2) of [1,2,3] is [[1,2],[2,3]].
+        fn sliding(size: int = 2, step: int = 1) -> Array<Collection<T>> {
+            let out = new Array<Collection<T>>();
+            let i = 0;
+            while (i + size <= self.items.size()) { out.push(new Collection<T>(self.items.slice(i, i + size))); i += step; }
+            return out;
+        }
+        // Into `groups` collections as even as possible.
+        fn split(groups: int) -> Array<Collection<T>> {
+            let out = new Array<Collection<T>>();
+            let n = self.items.size();
+            let at = 0;
+            for (g in 0..groups) {
+                let len = n / groups + (g < n % groups ? 1 : 0);
+                if (len == 0) { continue; }
+                out.push(new Collection<T>(self.items.slice(at, at + len)));
+                at += len;
+            }
+            return out;
+        }
+
+        // ── order ───────────────────────────────────────────────────────────────
+        fn sort(cmp: fn(T, T) -> int) -> Collection<T> { return new Collection<T>(self.items.sorted(cmp)); }
+        // By a number (stable: equal keys keep their order).
+        fn sortBy(f: fn(T) -> double) -> Collection<T> { return self.sortKeyed(f, false); }
+        fn sortByDesc(f: fn(T) -> double) -> Collection<T> { return self.sortKeyed(f, true); }
+        private fn sortKeyed(f: fn(T) -> double, desc: bool) -> Collection<T> {
+            // (each key worked out once, not once per comparison)
+            let n = self.items.size();
+            let keys = new Array<double>();
+            keys.reserve(n);
+            for (x in self.items) { keys.push(f(x)); }
+            let order = new Array<int>();
+            for (i in 0..n) { order.push(i); }
+            order.sortBy(fn(a: int, b: int) -> int {
+                let x = keys[a];
+                let y = keys[b];
+                let c = x < y ? -1 : (x > y ? 1 : 0);
+                return desc ? -c : c;
+            });
+            let out = new Array<T>();
+            out.reserve(n);
+            for (i in order) { out.push(self.items[i]); }
+            return new Collection<T>(out);
+        }
+        // By text, case-insensitively unless told otherwise.
+        fn sortByText(f: fn(T) -> string, desc: bool = false, caseSensitive: bool = false) -> Collection<T> {
+            let n = self.items.size();
+            let keys = new Array<string>();
+            for (x in self.items) { keys.push(caseSensitive ? f(x) : Str.lower(f(x))); }
+            let order = new Array<int>();
+            for (i in 0..n) { order.push(i); }
+            order.sortBy(fn(a: int, b: int) -> int { let c = Str.compare(keys[a], keys[b]); return desc ? -c : c; });
+            let out = new Array<T>();
+            for (i in order) { out.push(self.items[i]); }
+            return new Collection<T>(out);
+        }
+        // By several keys (a field name each, "-name" for descending): sortByKeys(["-score", "name"]).
+        fn sortByKeys(keys: Array<string>) -> Collection<T> {
+            return self.sort(fn(a: T, b: T) -> int {
+                for (k in keys) {
+                    let desc = Str.startsWith(k, "-");
+                    let key = desc ? k[1..] : k;
+                    let c = Data.order(Data.get(a as any, key), Data.get(b as any, key));
+                    if (c != 0) { return desc ? -c : c; }
+                }
+                return 0;
+            });
+        }
+        fn reverse() -> Collection<T> { return new Collection<T>(self.items.reversed()); }
+        fn shuffle() -> Collection<T> {
+            let out = self.items.copy();
+            for (i in out.size() - 1..0 step -1) {
+                let j = Random.nextInt(0, i);
+                let t = out[i];
+                out[i] = out[j];
+                out[j] = t;
+            }
+            return new Collection<T>(out);
+        }
+        // An item at random (ItemNotFoundException when empty).
+        fn random() -> T {
+            if (self.items.size() == 0) { throw new ItemNotFoundException("the collection is empty"); }
+            return self.items[Random.nextInt(0, self.items.size() - 1)];
+        }
+        // Items with a key seen before dropped (the first one stays).
+        fn unique(f: fn(T) -> string) -> Collection<T> {
+            let seen = new HashSet<string>();
+            let out = new Array<T>();
+            for (x in self.items) { let k = f(x); if (!seen.contains(k)) { seen.add(k); out.push(x); } }
+            return new Collection<T>(out);
+        }
+        // Items equal to an earlier one dropped.
+        fn distinct() -> Collection<T> {
+            let out = new Array<T>();
+            for (x in self.items) { if (!out.contains(x)) { out.push(x); } }
+            return new Collection<T>(out);
+        }
+        // The items whose key appeared before.
+        fn duplicates(f: fn(T) -> string) -> Collection<T> {
+            let seen = new HashSet<string>();
+            let out = new Array<T>();
+            for (x in self.items) { let k = f(x); if (seen.contains(k)) { out.push(x); } else { seen.add(k); } }
+            return new Collection<T>(out);
+        }
+
+        // ── slicing ─────────────────────────────────────────────────────────────
+        // The first `n` (the last -n when negative).
+        fn take(n: int) -> Collection<T> {
+            let size = self.items.size();
+            if (n < 0) { let from = size + n < 0 ? 0 : size + n; return new Collection<T>(self.items.slice(from, size)); }
+            return new Collection<T>(self.items.slice(0, n > size ? size : n));
+        }
+        fn skip(n: int) -> Collection<T> { return new Collection<T>(self.items.slice(n > self.items.size() ? self.items.size() : n, self.items.size())); }
+        fn slice(offset: int, length: int = -1) -> Collection<T> {
+            let size = self.items.size();
+            let from = offset < 0 ? (size + offset < 0 ? 0 : size + offset) : (offset > size ? size : offset);
+            let to = length < 0 ? size : (from + length > size ? size : from + length);
+            return new Collection<T>(self.items.slice(from, to));
+        }
+        fn takeWhile(f: fn(T) -> bool) -> Collection<T> { let i = 0; while (i < self.items.size() && f(self.items[i])) { i += 1; } return self.take(i); }
+        fn takeUntil(f: fn(T) -> bool) -> Collection<T> { let i = 0; while (i < self.items.size() && !f(self.items[i])) { i += 1; } return self.take(i); }
+        fn skipWhile(f: fn(T) -> bool) -> Collection<T> { let i = 0; while (i < self.items.size() && f(self.items[i])) { i += 1; } return self.skip(i); }
+        fn skipUntil(f: fn(T) -> bool) -> Collection<T> { let i = 0; while (i < self.items.size() && !f(self.items[i])) { i += 1; } return self.skip(i); }
+        // Page `page` (from 1) of `perPage`.
+        fn forPage(page: int, perPage: int) -> Collection<T> { return self.slice((page - 1) * perPage, perPage); }
+        // Filled to `size` items with `value` (at the front when size is negative).
+        fn pad(size: int, value: T) -> Collection<T> {
+            let out = self.items.copy();
+            let want = size < 0 ? -size : size;
+            while (out.size() < want) { if (size < 0) { out.insert(0, value); } else { out.push(value); } }
+            return new Collection<T>(out);
+        }
+
+        // ── combining ───────────────────────────────────────────────────────────
+        fn concat(other: Collection<T>) -> Collection<T> { let out = self.items.copy(); out.addAll(other.items); return new Collection<T>(out); }
+        fn merge(other: Array<T>) -> Collection<T> { let out = self.items.copy(); out.addAll(other); return new Collection<T>(out); }
+        // Pairs of items at the same place (as many as the shorter has; an array,
+        // for the reason chunk() gives one).
+        fn zip<U>(other: Collection<U>) -> Array<Pair<T, U>> {
+            let out = new Array<Pair<T, U>>();
+            let n = self.items.size() < other.items.size() ? self.items.size() : other.items.size();
+            for (i in 0..n) { out.push(new Pair<T, U>(self.items[i], other.items[i])); }
+            return out;
+        }
+        // Items not in `other` (by ==).
+        fn diff(other: Collection<T>) -> Collection<T> { return self.filter(fn(x: T) -> bool { return !other.items.contains(x); }); }
+        fn intersect(other: Collection<T>) -> Collection<T> { return self.filter(fn(x: T) -> bool { return other.items.contains(x); }); }
+        // Items whose key is not among `other`'s.
+        fn diffBy(other: Collection<T>, f: fn(T) -> string) -> Collection<T> {
+            let keys = new HashSet<string>();
+            for (x in other.items) { keys.add(f(x)); }
+            return self.filter(fn(x: T) -> bool { return !keys.contains(f(x)); });
+        }
+        fn intersectBy(other: Collection<T>, f: fn(T) -> string) -> Collection<T> {
+            let keys = new HashSet<string>();
+            for (x in other.items) { keys.add(f(x)); }
+            return self.filter(fn(x: T) -> bool { return keys.contains(f(x)); });
+        }
+
+        // ── changing in place ───────────────────────────────────────────────────
+        fn push(item: T) -> Collection<T> { self.items.push(item); return self; }
+        fn prepend(item: T) -> Collection<T> { self.items.insert(0, item); return self; }
+        fn pop() -> T { return self.items.pop(); }
+        fn shift() -> T { return self.items.removeAt(0); }
+        fn forget(index: int) -> Collection<T> { self.items.removeAt(index); return self; }
+        // Removes and returns `n` items from `offset`.
+        fn splice(offset: int, n: int) -> Collection<T> {
+            let out = new Array<T>();
+            for (k in 0..n) { if (offset < self.items.size()) { out.push(self.items.removeAt(offset)); } }
+            return new Collection<T>(out);
+        }
+
+        // ── numbers (by a key function, or the items themselves when numeric) ──
+        fn sum(f: fn(T) -> double) -> double { let t = 0.0; for (x in self.items) { t += f(x); } return t; }
+        fn sumOf(key: string) -> double { let t = 0.0; for (x in self.items) { t += Data.number(Data.get(x as any, key)); } return t; }
+        fn total() -> double { let t = 0.0; for (x in self.items) { t += Data.number(x as any); } return t; }
+        fn avg(f: fn(T) -> double) -> double { return self.items.size() == 0 ? 0.0 : self.sum(f) / (self.items.size() as double); }
+        fn average() -> double { return self.items.size() == 0 ? 0.0 : self.total() / (self.items.size() as double); }
+        fn min(f: fn(T) -> double) -> double {
+            if (self.items.size() == 0) { return 0.0; }
+            let m = f(self.items[0]);
+            for (x in self.items) { let v = f(x); if (v < m) { m = v; } }
+            return m;
+        }
+        fn max(f: fn(T) -> double) -> double {
+            if (self.items.size() == 0) { return 0.0; }
+            let m = f(self.items[0]);
+            for (x in self.items) { let v = f(x); if (v > m) { m = v; } }
+            return m;
+        }
+        // The item with the smallest (largest) key.
+        fn minBy(f: fn(T) -> double) -> T { return self.sortBy(f).first(); }
+        fn maxBy(f: fn(T) -> double) -> T { return self.sortByDesc(f).first(); }
+        fn median(f: fn(T) -> double) -> double {
+            let n = self.items.size();
+            if (n == 0) { return 0.0; }
+            let vs = new Array<double>();
+            for (x in self.items) { vs.push(f(x)); }
+            vs.sortBy(fn(a: double, b: double) -> int { return a < b ? -1 : (a > b ? 1 : 0); });
+            return n % 2 == 1 ? vs[n / 2] : (vs[n / 2 - 1] + vs[n / 2]) / 2.0;
+        }
+        // The most common keys (several when tied).
+        fn mode(f: fn(T) -> string) -> Array<string> {
+            let counts = self.countBy(f);
+            let best = 0;
+            for (k in counts.keys()) { if (counts[k] > best) { best = counts[k]; } }
+            let out = new Array<string>();
+            for (k in self.groupKeys(f)) { if (counts[k] == best) { out.push(k); } }
+            return out;
+        }
+        // The `p`th percentile (0..100) of the keys, interpolated.
+        fn percentile(p: double, f: fn(T) -> double) -> double {
+            let n = self.items.size();
+            if (n == 0) { return 0.0; }
+            let vs = new Array<double>();
+            for (x in self.items) { vs.push(f(x)); }
+            vs.sortBy(fn(a: double, b: double) -> int { return a < b ? -1 : (a > b ? 1 : 0); });
+            let rank = (p / 100.0) * ((n - 1) as double);
+            let lo = rank as int;
+            let hi = lo + 1 < n ? lo + 1 : lo;
+            return vs[lo] + (vs[hi] - vs[lo]) * (rank - (lo as double));
+        }
+
+        // ── text ────────────────────────────────────────────────────────────────
+        // "a, b and c" (finalSep between the last two).
+        fn join(sep: string, finalSep: string = "") -> string {
+            let parts = new Array<string>();
+            for (x in self.items) { parts.push(str(x as any)); }
+            if (finalSep == "" || parts.size() < 2) { return Str.join(parts, sep); }
+            let last = parts.pop();
+            return Str.join(parts, sep) + finalSep + last;
+        }
+        fn implode(f: fn(T) -> string, sep: string) -> string {
+            let parts = new Array<string>();
+            for (x in self.items) { parts.push(f(x)); }
+            return Str.join(parts, sep);
+        }
+
+        // ── flow ────────────────────────────────────────────────────────────────
+        fn tap(f: fn(Collection<T>)) -> Collection<T> { f(self); return self; }
+        fn pipe<U>(f: fn(Collection<T>) -> U) -> U { return f(self); }
+        fn when(condition: bool, f: fn(Collection<T>) -> Collection<T>) -> Collection<T> { return condition ? f(self) : self; }
+        fn unless(condition: bool, f: fn(Collection<T>) -> Collection<T>) -> Collection<T> { return condition ? self : f(self); }
+        fn whenEmpty(f: fn(Collection<T>) -> Collection<T>) -> Collection<T> { return self.items.size() == 0 ? f(self) : self; }
+        fn whenNotEmpty(f: fn(Collection<T>) -> Collection<T>) -> Collection<T> { return self.items.size() > 0 ? f(self) : self; }
+        // Throws when any item fails `f` (for checking inputs in a chain).
+        fn ensure(f: fn(T) -> bool, message: string = "an item is not of the expected kind") -> Collection<T> {
+            for (x in self.items) { if (!f(x)) { throw new ValueError(message); } }
+            return self;
+        }
+        // Each item as a plain value (for JSON).
+        fn jsonValue() -> any {
+            let out = new Array<any>();
+            for (x in self.items) { out.push(x as any); }
+            return out;
+        }
+        fn toString() -> string { return str(self.jsonValue()); }
+    }
+
+    // Reaching into plain values and objects by dotted path, as Laravel's data_get.
+    class Data {
+        // The value at "user.address.city" / "items.0.price" / "tags.*" in maps,
+        // arrays and objects (fields, then a getter method with no parameters);
+        // null when something on the way is missing. A `*` gives an Array<any> of every match.
+        static fn get(target: any, path: string) -> any {
+            if (path == "") { return target; }
+            if (!Str.contains(path, ".")) { return Data.step(target, path); }
+            let parts = Str.split(path, ".");
+            return Data.walk(target, parts, 0);
+        }
+        private static fn walk(cur: any, parts: Array<string>, i: int) -> any {
+            if (i == parts.size() || cur == null) { return cur; }
+            let p = parts[i];
+            if (p == "*") {
+                let out = new Array<any>();
+                if (cur is Array<any>) { for (x in cur as Array<any>) { Data.flatPush(out, Data.walk(x, parts, i + 1), i + 1 < parts.size() && Data.hasStar(parts, i + 1)); } }
+                else if (cur is HashMap<string, any>) { (cur as HashMap<string, any>).forEach(fn(k: string, x: any) { Data.flatPush(out, Data.walk(x, parts, i + 1), Data.hasStar(parts, i + 1)); }); }
+                return out;
+            }
+            return Data.walk(Data.step(cur, p), parts, i + 1);
+        }
+        private static fn hasStar(parts: Array<string>, from: int) -> bool { for (k in from..parts.size()) { if (parts[k] == "*") { return true; } } return false; }
+        private static fn flatPush(out: Array<any>, v: any, flatten: bool) {
+            if (flatten && v is Array<any>) { out.addAll(v as Array<any>); } else { out.push(v); }
+        }
+        // One step: a map key, an array index, a field or getter of an object.
+        static fn step(cur: any, key: string) -> any {
+            if (cur == null) { return null; }
+            if (cur is HashMap<string, any>) { return (cur as HashMap<string, any>).getOr(key, null); }
+            if (cur is HashMap<string, string>) { let m = cur as HashMap<string, string>; return m.containsKey(key) ? m[key] as any : null; }
+            if (cur is Array<any>) {
+                let a = cur as Array<any>;
+                let i = Integer.parseOr(key, -1) as int;
+                return i >= 0 && i < a.size() ? a[i] : null;
+            }
+            if (cur is Array<string>) {
+                let a = cur as Array<string>;
+                let i = Integer.parseOr(key, -1) as int;
+                return i >= 0 && i < a.size() ? a[i] as any : null;
+            }
+            let info = ClassInfo.of(cur);
+            if (info == null || !info.isReflected()) { return null; }
+            let f = info.field(key);
+            if (f != null && f.canGet()) { return f.get(cur); }
+            let prop = info.property(key);
+            if (prop != null && prop.canGet()) { return prop.get(cur); }
+            let m = info.method(key);
+            if (m != null && m.paramCount() == 0 && m.canInvoke()) { return m.invoke(cur); }
+            return null;
+        }
+        // Sets a dotted path in nested maps (making the maps on the way).
+        static fn set(target: HashMap<string, any>, path: string, value: any) {
+            let parts = Str.split(path, ".");
+            let node = target;
+            for (i in 0..parts.size() - 1) {
+                let next = node.getOr(parts[i], null);
+                if (!(next is HashMap<string, any>)) { next = new HashMap<string, any>(); node.put(parts[i], next); }
+                node = next as HashMap<string, any>;
+            }
+            node.put(parts[parts.size() - 1], value);
+        }
+        // A value as a number (0 for what is not one).
+        static fn number(v: any) -> double {
+            if (v == null) { return 0.0; }
+            if (v is long) { return (v as long) as double; }
+            if (v is int) { return (v as int) as double; }
+            if (v is double) { return v as double; }
+            if (v is float) { return (v as float) as double; }
+            if (v is bool) { return v as bool ? 1.0 : 0.0; }
+            if (v is string) { return Format.toFloatOr(v as string, 0.0); }
+            return 0.0;
+        }
+        static fn isNumber(v: any) -> bool { return v is long || v is int || v is double || v is float; }
+        // -1, 0, 1: numbers by value, Moments in time, else by text.
+        static fn order(a: any, b: any) -> int {
+            if (a == null || b == null) { return a == null && b == null ? 0 : (a == null ? -1 : 1); }
+            if (Data.isNumber(a) && Data.isNumber(b)) { let x = Data.number(a); let y = Data.number(b); return x < y ? -1 : (x > y ? 1 : 0); }
+            if (a is Moment && b is Moment) { return (a as Moment).compareTo(b as Moment); }
+            if (a is bool && b is bool) { return (a as bool) == (b as bool) ? 0 : ((a as bool) ? 1 : -1); }
+            let c = Str.compare(str(a), str(b));
+            return c < 0 ? -1 : (c > 0 ? 1 : 0);
+        }
+        // Whether two values are loosely equal (1 == 1.0 == "1", as Laravel's where).
+        static fn same(a: any, b: any) -> bool {
+            if (a == null || b == null) { return a == null && b == null; }
+            if (Data.isNumber(a) || Data.isNumber(b)) {
+                if ((a is string && !Format.isNumber(a as string)) || (b is string && !Format.isNumber(b as string))) { return false; }
+                return Data.number(a) == Data.number(b);
+            }
+            if (a is bool || b is bool) { return Data.number(a) == Data.number(b); }
+            return Data.order(a, b) == 0;
+        }
+        static fn compare(v: any, op: string, value: any) -> bool {
+            if (op == "=" || op == "==") { return Data.same(v, value); }
+            if (op == "!=" || op == "<>") { return !Data.same(v, value); }
+            if (op == "===") { return v == value || (v != null && value != null && str(v) == str(value) && typename(v) == typename(value)); }
+            if (op == "<") { return v != null && Data.order(v, value) < 0; }
+            if (op == "<=") { return v != null && Data.order(v, value) <= 0; }
+            if (op == ">") { return v != null && Data.order(v, value) > 0; }
+            if (op == ">=") { return v != null && Data.order(v, value) >= 0; }
+            if (op == "like") { return v != null && Data.like(str(v), str(value)); }
+            if (op == "not like") { return v == null || !Data.like(str(v), str(value)); }
+            if (op == "in" || op == "not in") {
+                let found = false;
+                if (value is Array<any>) { for (x in value as Array<any>) { if (Data.same(v, x)) { found = true; break; } } }
+                return op == "in" ? found : !found;
+            }
+            throw new ValueError("unknown operator '" + op + "'");
+        }
+        // SQL LIKE: % any text, _ one character, case-insensitive.
+        static fn like(text: string, pattern: string) -> bool {
+            return Path.matches(Str.lower(text), Str.replace(Str.replace(Str.lower(pattern), "%", "*"), "_", "?"));
+        }
+    }
+
+    // Helpers for HashMap<string, any> (decoded JSON, config, request input).
+    class Arr {
+        static fn get(m: HashMap<string, any>, path: string, fallback: any = null) -> any { let v = Data.get(m, path); return v == null ? fallback : v; }
+        static fn set(m: HashMap<string, any>, path: string, value: any) { Data.set(m, path, value); }
+        static fn has(m: HashMap<string, any>, path: string) -> bool {
+            let parts = Str.split(path, ".");
+            let cur: any = m;
+            for (p in parts) {
+                if (!(cur is HashMap<string, any>) || !(cur as HashMap<string, any>).containsKey(p)) { return false; }
+                cur = (cur as HashMap<string, any>)[p];
+            }
+            return true;
+        }
+        // Removes a dotted path; whether it was there.
+        static fn forget(m: HashMap<string, any>, path: string) -> bool {
+            let parts = Str.split(path, ".");
+            let node = m;
+            for (i in 0..parts.size() - 1) {
+                let next = node.getOr(parts[i], null);
+                if (!(next is HashMap<string, any>)) { return false; }
+                node = next as HashMap<string, any>;
+            }
+            return node.remove(parts[parts.size() - 1]);
+        }
+        static fn only(m: HashMap<string, any>, keys: Array<string>) -> HashMap<string, any> {
+            let out = new HashMap<string, any>();
+            for (k in keys) { if (m.containsKey(k)) { out.put(k, m[k]); } }
+            return out;
+        }
+        static fn except(m: HashMap<string, any>, keys: Array<string>) -> HashMap<string, any> {
+            let drop = new HashSet<string>();
+            for (k in keys) { drop.add(k); }
+            let out = new HashMap<string, any>();
+            m.forEach(fn(k: string, v: any) { if (!drop.contains(k)) { out.put(k, v); } });
+            return out;
+        }
+        // Nested maps flattened to dotted keys: {"a": {"b": 1}} -> {"a.b": 1}.
+        static fn dot(m: HashMap<string, any>, prefix: string = "") -> HashMap<string, any> {
+            let out = new HashMap<string, any>();
+            Arr.dotInto(out, m, prefix);
+            return out;
+        }
+        private static fn dotInto(out: HashMap<string, any>, m: HashMap<string, any>, prefix: string) {
+            m.forEach(fn(k: string, v: any) {
+                if (v is HashMap<string, any> && (v as HashMap<string, any>).size() > 0) { Arr.dotInto(out, v as HashMap<string, any>, prefix + k + "."); }
+                else { out.put(prefix + k, v); }
+            });
+        }
+        // The reverse of dot().
+        static fn undot(m: HashMap<string, any>) -> HashMap<string, any> {
+            let out = new HashMap<string, any>();
+            m.forEach(fn(k: string, v: any) { Data.set(out, k, v); });
+            return out;
+        }
+        // `v` as an array: itself if it is one, [] for null, else [v].
+        static fn wrap(v: any) -> Array<any> {
+            if (v == null) { return new Array<any>(); }
+            if (v is Array<any>) { return v as Array<any>; }
+            return [v];
+        }
+        // Nested arrays flattened (to `depth` levels; -1 for all).
+        static fn flatten(a: Array<any>, depth: int = -1) -> Array<any> {
+            let out = new Array<any>();
+            for (x in a) {
+                if (x is Array<any> && depth != 0) { out.addAll(Arr.flatten(x as Array<any>, depth - 1)); } else { out.push(x); }
+            }
+            return out;
+        }
+        static fn pluck(a: Array<any>, key: string) -> Array<any> {
+            let out = new Array<any>();
+            for (x in a) { out.push(Data.get(x, key)); }
+            return out;
+        }
+        // Whether the keys are 0..n-1 in a map from JSON (a list in disguise).
+        static fn isList(v: any) -> bool { return v is Array<any> || v is Array<string>; }
+        // Every key-value pair whose value passes `f`.
+        static fn where(m: HashMap<string, any>, f: fn(string, any) -> bool) -> HashMap<string, any> {
+            let out = new HashMap<string, any>();
+            m.forEach(fn(k: string, v: any) { if (f(k, v)) { out.put(k, v); } });
+            return out;
+        }
+        // "key1=value1&key2=value2" from a flat map.
+        static fn query(m: HashMap<string, any>) -> string {
+            let parts = new Array<string>();
+            let keys = m.keys();
+            Sort.sort(keys);
+            for (k in keys) { parts.push(Url.encode(k) + "=" + Url.encode(m[k] == null ? "" : str(m[k]))); }
+            return Str.join(parts, "&");
+        }
+        // An item at random (null when empty).
+        static fn random(a: Array<any>) -> any { return a.size() == 0 ? null : a[Random.nextInt(0, a.size() - 1)]; }
+    }
+}
