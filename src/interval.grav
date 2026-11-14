@@ -1,0 +1,337 @@
+// interval.grav — Interval (a length of calendar time: 1 month 2 days 3
+// hours, as CarbonInterval) and Period (the moments from a start to an end,
+// a step apart, as CarbonPeriod).
+//
+//   Interval.parse("1 day 2 hours").forHumans()           // "1 day 2 hours"
+//   Interval.parse("PT90M").cascade().forHumans()         // "1 hour 30 minutes"
+//   Period.between(Moment.parse("2026-11-01"), Moment.parse("2026-11-30"), Interval.ofWeeks(1)).count()   // 5
+import "std"
+import "moment.grav"
+
+namespace apogee {
+
+    class Interval {
+        public years: long = 0
+        public months: long = 0
+        public days: long = 0
+        public hours: long = 0
+        public minutes: long = 0
+        public seconds: long = 0
+        public micros: long = 0
+        // Negative (it goes back in time).
+        public invert: bool = false
+        // From Moment.diff(): the whole days between the two (-1 otherwise).
+        public totalDays: long = -1
+
+        constructor() {}
+        static fn of(years: long = 0, months: long = 0, days: long = 0, hours: long = 0, minutes: long = 0, seconds: long = 0, micros: long = 0) -> Interval {
+            let i = new Interval();
+            i.years = years; i.months = months; i.days = days; i.hours = hours; i.minutes = minutes; i.seconds = seconds; i.micros = micros;
+            return i.normalizedSign();
+        }
+        static fn ofYears(n: long) -> Interval { return Interval.of(n); }
+        static fn ofMonths(n: long) -> Interval { return Interval.of(0, n); }
+        static fn ofWeeks(n: long) -> Interval { return Interval.of(0, 0, n * 7); }
+        static fn ofDays(n: long) -> Interval { return Interval.of(0, 0, n); }
+        static fn ofHours(n: long) -> Interval { return Interval.of(0, 0, 0, n); }
+        static fn ofMinutes(n: long) -> Interval { return Interval.of(0, 0, 0, 0, n); }
+        static fn ofSeconds(n: long) -> Interval { return Interval.of(0, 0, 0, 0, 0, n); }
+        static fn ofMillis(n: long) -> Interval { return Interval.of(0, 0, 0, 0, 0, 0, n * 1000); }
+        static fn ofMicros(n: long) -> Interval { return Interval.of(0, 0, 0, 0, 0, 0, n); }
+        // An amount of a unit: Interval.make(3, "weeks").
+        static fn make(amount: long, unit: string) -> Interval { return new Interval().plus(amount, unit); }
+        // From a std Duration.
+        static fn fromDuration(d: Duration) -> Interval { return Interval.ofMillis(d.ms).cascade(); }
+        // (all parts the same sign: a negative interval keeps them positive and sets invert)
+        private fn normalizedSign() -> Interval {
+            if (self.years < 0 || self.months < 0 || self.days < 0 || self.hours < 0 || self.minutes < 0 || self.seconds < 0 || self.micros < 0) {
+                if (self.years <= 0 && self.months <= 0 && self.days <= 0 && self.hours <= 0 && self.minutes <= 0 && self.seconds <= 0 && self.micros <= 0) {
+                    self.years = -self.years; self.months = -self.months; self.days = -self.days;
+                    self.hours = -self.hours; self.minutes = -self.minutes; self.seconds = -self.seconds; self.micros = -self.micros;
+                    self.invert = !self.invert;
+                }
+            }
+            return self;
+        }
+
+        // "2 days 3 hours", "1 week, 2 days", "90 minutes", "1h 30m", "-1 day",
+        // or ISO 8601 "P1Y2M10DT2H30M", "PT0.5S", "P2W". ValueError otherwise.
+        static fn parse(text: string) -> Interval {
+            let i = Interval.tryParse(text);
+            if (i == null) { throw new ValueError("not an interval: '" + text + "'"); }
+            return i;
+        }
+        static fn tryParse(text: string) -> Interval {
+            let t = Str.trim(text);
+            if (t == "") { return null; }
+            let neg = Str.startsWith(t, "-");
+            let body = neg || Str.startsWith(t, "+") ? Str.trim(t[1..]) : t;
+            let i = Str.startsWith(Str.upper(body), "P") ? Interval.parseIso(Str.upper(body)) : Interval.parseWords(Str.lower(body));
+            if (i != null && neg) { i.invert = !i.invert; }
+            return i;
+        }
+        private static fn parseIso(t: string) -> Interval {
+            let i = new Interval();
+            let inTime = false;
+            let num = "";
+            let any = false;
+            for (k in 1..t.length) {
+                let c = t[k] as int;
+                if (c == 84) { inTime = true; continue; }
+                if ((c >= 48 && c <= 57) || c == 46 || c == 44) { num = num + t[k..k + 1]; continue; }
+                if (num == "") { return null; }
+                let whole = Integer.parseOr(Str.before(Str.replace(num, ",", "."), "."), 0);
+                let frac = Str.contains(num, ".") || Str.contains(num, ",") ? Format.toFloatOr("0." + Str.after(Str.replace(num, ",", "."), "."), 0.0) : 0.0;
+                if (c == 89 && !inTime) { i.years += whole; }
+                else if (c == 77 && !inTime) { i.months += whole; }
+                else if (c == 87 && !inTime) { i.days += whole * 7; }
+                else if (c == 68 && !inTime) { i.days += whole; }
+                else if (c == 72 && inTime) { i.hours += whole; i.seconds += (frac * 3600.0) as long; }
+                else if (c == 77 && inTime) { i.minutes += whole; i.seconds += (frac * 60.0) as long; }
+                else if (c == 83 && inTime) { i.seconds += whole; i.micros += (frac * 1000000.0 + 0.5) as long; }
+                else { return null; }
+                num = "";
+                any = true;
+            }
+            return any && num == "" ? i : null;
+        }
+        private static fn parseWords(t: string) -> Interval {
+            let i = new Interval();
+            // ("1h30m" -> "1 h 30 m")
+            let sb = new StringBuilder();
+            let prev = 0;
+            for (k in 0..t.length) {
+                let c = t[k] as int;
+                let digit = c >= 48 && c <= 57;
+                let prevDigit = prev >= 48 && prev <= 57;
+                if (c == 44) { sb.appendChar(32); prev = 32; continue; }
+                if (k > 0 && digit != prevDigit && prev != 32 && c != 32 && c != 46 && prev != 46) { sb.appendChar(32); }
+                sb.appendChar(c);
+                prev = c;
+            }
+            let words = new Array<string>();
+            for (w in Str.split(sb.toString(), " ")) { if (w != "" && w != "and") { words.push(w); } }
+            if (words.size() == 0 || words.size() % 2 != 0) { return null; }
+            let k = 0;
+            while (k < words.size()) {
+                let n = words[k] == "a" || words[k] == "an" ? 1.0 : Format.toFloatOr(words[k], -1.0);
+                if (n < 0.0) { return null; }
+                let u = Units.normalize(words[k + 1]);
+                if (!Units.isUnit(u) && u != "weekday") { return null; }
+                i = i.plusFloat(n, u);
+                k += 2;
+            }
+            return i;
+        }
+        private fn plusFloat(n: double, unit: string) -> Interval {
+            let whole = n as long;
+            let out = self.plus(whole, unit);
+            let frac = n - (whole as double);
+            if (frac > 0.0) {
+                let secs = Units.seconds(unit);
+                if (secs > 0) { out.micros += (frac * (secs as double) * 1000000.0 + 0.5) as long; }
+            }
+            return out;
+        }
+
+        // ── arithmetic (each returns a new interval) ─────────────────────────────
+        fn copy() -> Interval {
+            let i = Interval.of(self.years, self.months, self.days, self.hours, self.minutes, self.seconds, self.micros);
+            i.invert = self.invert;
+            return i;
+        }
+        // plus(2, "hours").
+        fn plus(amount: long, unit: string) -> Interval {
+            let i = self.copy();
+            let u = Units.normalize(unit);
+            let a = self.invert ? -amount : amount;
+            if (u == "year") { i.years += a; }
+            else if (u == "decade") { i.years += a * 10; }
+            else if (u == "century") { i.years += a * 100; }
+            else if (u == "millennium") { i.years += a * 1000; }
+            else if (u == "quarter") { i.months += a * 3; }
+            else if (u == "month") { i.months += a; }
+            else if (u == "week") { i.days += a * 7; }
+            else if (u == "day" || u == "weekday") { i.days += a; }
+            else if (u == "hour") { i.hours += a; }
+            else if (u == "minute") { i.minutes += a; }
+            else if (u == "second") { i.seconds += a; }
+            else if (u == "millisecond") { i.micros += a * 1000; }
+            else if (u == "microsecond") { i.micros += a; }
+            else { throw new ValueError("unknown unit '" + unit + "'"); }
+            return i.normalizedSign();
+        }
+        fn add(other: Interval) -> Interval {
+            let s = other.invert != self.invert ? -1 as long : 1 as long;
+            let i = self.copy();
+            i.years += s * other.years; i.months += s * other.months; i.days += s * other.days;
+            i.hours += s * other.hours; i.minutes += s * other.minutes; i.seconds += s * other.seconds; i.micros += s * other.micros;
+            return i.normalizedSign();
+        }
+        fn subtract(other: Interval) -> Interval { return self.add(other.negated()); }
+        fn negated() -> Interval { let i = self.copy(); i.invert = !i.invert; return i; }
+        fn abs() -> Interval { let i = self.copy(); i.invert = false; return i; }
+        fn times(factor: long) -> Interval {
+            let i = Interval.of(self.years * factor, self.months * factor, self.days * factor, self.hours * factor, self.minutes * factor, self.seconds * factor, self.micros * factor);
+            if (self.invert) { i.invert = !i.invert; }
+            return i;
+        }
+        // Carried over: 90 minutes -> 1 hour 30 minutes; 14 months -> 1 year 2
+        // months (days stay days: a month has no fixed length).
+        fn cascade() -> Interval {
+            let i = self.copy();
+            i.seconds += i.micros / 1000000; i.micros = i.micros % 1000000;
+            i.minutes += i.seconds / 60; i.seconds = i.seconds % 60;
+            i.hours += i.minutes / 60; i.minutes = i.minutes % 60;
+            i.days += i.hours / 24; i.hours = i.hours % 24;
+            i.years += i.months / 12; i.months = i.months % 12;
+            return i;
+        }
+        fn isEmpty() -> bool { return self.years == 0 && self.months == 0 && self.days == 0 && self.hours == 0 && self.minutes == 0 && self.seconds == 0 && self.micros == 0; }
+        fn isNegative() -> bool { return self.invert && !self.isEmpty(); }
+        fn weeks() -> long { return self.days / 7; }
+        fn daysExcludeWeeks() -> long { return self.days % 7; }
+
+        // Totals, counting a month as 30 days and a year as 365 (as most
+        // timeouts and caches want); from Moment.diff() the days are exact.
+        fn totalMicros() -> long {
+            let days = self.totalDays >= 0 ? self.totalDays : self.years * 365 + self.months * 30 + self.days;
+            let t = ((days * 24 + self.hours) * 60 + self.minutes) * 60 + self.seconds;
+            let v = t * 1000000 + self.micros;
+            return self.invert ? -v : v;
+        }
+        fn totalMillis() -> long { return self.totalMicros() / 1000; }
+        fn totalSeconds() -> long { return self.totalMicros() / 1000000; }
+        fn totalMinutes() -> long { return self.totalSeconds() / 60; }
+        fn totalHours() -> long { return self.totalSeconds() / 3600; }
+        fn totalDaysApprox() -> long { return self.totalSeconds() / 86400; }
+        // As a std Duration (for timeouts, sleeps, cache lifetimes).
+        fn toDuration() -> Duration { return Duration.ofMillis(self.totalMillis()); }
+        fn compareTo(o: Interval) -> int { let a = self.totalMicros(); let b = o.totalMicros(); return a == b ? 0 : (a < b ? -1 : 1); }
+        fn operator==(o: Interval) -> bool { return o != null && self.compareTo(o) == 0; }
+        fn operator<(o: Interval) -> bool { return self.compareTo(o) < 0; }
+        fn operator>(o: Interval) -> bool { return self.compareTo(o) > 0; }
+
+        // "1 year 2 months 3 days", at most `parts` units (largest first; 0 for
+        // all), "1y 2mo 3d" when short; "" when empty.
+        fn forHumans(short: bool = false, parts: int = 0, join: string = " ") -> string {
+            let names = ["year", "month", "week", "day", "hour", "minute", "second"];
+            let shorts = ["y", "mo", "w", "d", "h", "m", "s"];
+            let values: Array<long> = [self.years, self.months, self.days / 7, self.days % 7, self.hours, self.minutes, self.seconds];
+            let out = new Array<string>();
+            for (k in 0..7) {
+                let v = values[k];
+                if (v == 0) { continue; }
+                if (parts > 0 && out.size() >= parts) { break; }
+                out.push(short ? "${v}" + shorts[k] : "${v} " + names[k] + (v == 1 ? "" : "s"));
+            }
+            if (out.size() == 0 && self.micros >= 1000) {
+                let ms = self.micros / 1000;
+                out.push(short ? "${ms}ms" : "${ms} millisecond" + (ms == 1 ? "" : "s"));
+            }
+            return Str.join(out, join);
+        }
+        // ISO 8601: "P1Y2M3DT4H5M6S" ("PT0S" when empty; "-P…" when inverted).
+        fn toIso() -> string {
+            let sb = new StringBuilder();
+            if (self.invert) { sb.append("-"); }
+            sb.append("P");
+            if (self.years != 0) { sb.appendInt(self.years).append("Y"); }
+            if (self.months != 0) { sb.appendInt(self.months).append("M"); }
+            if (self.days != 0) { sb.appendInt(self.days).append("D"); }
+            if (self.hours != 0 || self.minutes != 0 || self.seconds != 0 || self.micros != 0) {
+                sb.append("T");
+                if (self.hours != 0) { sb.appendInt(self.hours).append("H"); }
+                if (self.minutes != 0) { sb.appendInt(self.minutes).append("M"); }
+                if (self.seconds != 0 || self.micros != 0) {
+                    sb.appendInt(self.seconds);
+                    if (self.micros != 0) {
+                        let f = "${self.micros + 1000000}"[1..];
+                        while (Str.endsWith(f, "0")) { f = f[..f.length - 1]; }
+                        sb.append(".").append(f);
+                    }
+                    sb.append("S");
+                }
+            }
+            let s = sb.toString();
+            return Str.endsWith(s, "P") ? s + "T0S" : s;
+        }
+        fn toString() -> string { let h = self.forHumans(); return h == "" ? "0 seconds" : (self.invert ? "-" + h : h); }
+    }
+
+    // The moments from a start to an end (or for a number of recurrences), a step apart.
+    //
+    //   for (day in Period.create("2026-11-01", "2026-11-07").toArray()) { ... }
+    //   Period.between(a, b, Interval.ofHours(1)).excludeEnd().filter(fn(m: Moment) -> bool { return m.isWeekday() })
+    class Period {
+        public start: Moment
+        public end: Moment
+        public step: Interval
+        public recurrences: int = -1
+        private withStart: bool = true
+        private withEnd: bool = true
+        private filters: Array<fn(Moment) -> bool>
+
+        constructor(start: Moment, end: Moment, step: Interval) {
+            self.start = start; self.end = end; self.step = step;
+            self.filters = new Array<fn(Moment) -> bool>();
+            if (step.isEmpty() || step.isNegative()) { throw new ValueError("a period's step must be positive"); }
+        }
+        static fn between(start: Moment, end: Moment, step: Interval = Interval.ofDays(1)) -> Period { return new Period(start, end, step); }
+        // Period.create("2026-11-01", "2026-11-30", "1 week").
+        static fn create(start: string, end: string, step: string = "1 day", tz: string = "") -> Period {
+            return new Period(Moment.parse(start, tz), Moment.parse(end, tz), Interval.parse(step));
+        }
+        // `times` moments from `start`, a step apart (no end).
+        static fn times(start: Moment, times: int, step: Interval = Interval.ofDays(1)) -> Period {
+            let p = new Period(start, null, step);
+            p.recurrences = times;
+            return p;
+        }
+        fn excludeStart() -> Period { self.withStart = false; return self; }
+        fn excludeEnd() -> Period { self.withEnd = false; return self; }
+        // Keeps only the moments `f` accepts (several filters: all must).
+        fn filter(f: fn(Moment) -> bool) -> Period { self.filters.push(f); return self; }
+        fn weekdays() -> Period { return self.filter(fn(m: Moment) -> bool { return m.isWeekday(); }); }
+        fn weekends() -> Period { return self.filter(fn(m: Moment) -> bool { return m.isWeekend(); }); }
+
+        // Every moment, in order (each step from the start, so months do not drift: Jan 31, Feb 28, Mar 31).
+        fn forEach(f: fn(Moment)) {
+            let n = 0 as long;
+            let kept = 0;
+            while (true) {
+                let m = self.start.plus(self.step.times(n));
+                n += 1;
+                if (self.end != null) {
+                    if (m.gt(self.end) || (!self.withEnd && m.eq(self.end))) { break; }
+                } else if (kept >= self.recurrences) { break; }
+                if (n == 1 && !self.withStart) { continue; }
+                let ok = true;
+                for (flt in self.filters) { if (!flt(m)) { ok = false; break; } }
+                if (!ok) { continue; }
+                kept += 1;
+                f(m);
+                if (self.end != null && self.recurrences >= 0 && kept >= self.recurrences) { break; }
+            }
+        }
+        fn toArray() -> Array<Moment> {
+            let out = new Array<Moment>();
+            self.forEach(fn(m: Moment) { out.push(m); });
+            return out;
+        }
+        fn count() -> int { return self.toArray().size(); }
+        fn first() -> Moment { let a = self.toArray(); return a.size() > 0 ? a[0] : null; }
+        fn last() -> Moment { let a = self.toArray(); return a.size() > 0 ? a[a.size() - 1] : null; }
+        // Whether `m` falls between the start and the end.
+        fn contains(m: Moment) -> bool {
+            if (self.end == null) { return m.gte(self.start); }
+            let afterStart = self.withStart ? m.gte(self.start) : m.gt(self.start);
+            let beforeEnd = self.withEnd ? m.lte(self.end) : m.lt(self.end);
+            return afterStart && beforeEnd;
+        }
+        // Whether two periods share any time.
+        fn overlaps(o: Period) -> bool { return self.start.lte(o.end) && o.start.lte(self.end); }
+        fn length() -> Interval { return self.start.diff(self.end); }
+        fn toString() -> string { return self.start.toDateTimeString() + " - " + (self.end == null ? "${self.recurrences} times" : self.end.toDateTimeString()) + " every " + self.step.forHumans(); }
+    }
+}

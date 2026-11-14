@@ -1,0 +1,1217 @@
+// moment.grav — Moment: a point in time in a time zone, with Carbon's API
+// (and more): creating and parsing (ISO, relative English, formats), PHP
+// date() formatting, calendar-aware arithmetic, start/end of any unit,
+// comparisons, differences, "3 days ago", and a frozen clock for tests.
+//
+//   let m = Moment.now("Africa/Nairobi")
+//   m.addMonths(1).startOfMonth().format("l, jS F Y")        // "Monday, 1st December 2026"
+//   Moment.parse("next friday 17:00").diffForHumans()        // "in 3 days"
+//   Moment.parse("2024-03-10 02:30", "America/New_York")     // 03:30 EDT (past the gap)
+//   Moment.setTestNow(Moment.parse("2026-01-01"))            // now() stands still
+//
+// Moments are immutable: addDays() and the rest return a new one, so a moment
+// shared between requests or threads never changes under anyone. Its fields
+// (year … second, the offset) are worked out once, when it is made.
+import "std"
+import "timezone.grav"
+import "interval.grav"
+
+namespace apogee {
+
+    // Something with its own JSON form (JsonWriter writes jsonValue() in its place).
+    interface Jsonable {
+        fn jsonValue() -> any
+    }
+
+    class Moment implements Jsonable {
+        private ts: long
+        private us: int
+        private zone: TimeZone
+        private off: int
+        private dayNum: long            // local days since 1970-01-01
+        private yr: long
+        private mon: int
+        private dy: int
+        private hr: int
+        private mn: int
+        private sc: int
+
+        // The frozen "now" (setTestNow), or null for the real clock.
+        static testNow: Moment = null
+        // The zone moments are made in when none is named (null: the system's).
+        static defaultZone: TimeZone = null
+        // The first day of a week for startOfWeek/endOfWeek: 1 = Monday … 7 = Sunday.
+        static weekStartsAt: int = 1
+        static monthNames: Array<string> = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        static dayNames: Array<string> = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+
+        constructor(unixSeconds: long, micros: int, zone: TimeZone) {
+            self.ts = unixSeconds;
+            self.us = micros;
+            self.zone = zone;
+            self.off = zone.offsetAt(unixSeconds);
+            let local = unixSeconds + (self.off as long);
+            let dn = local / 86400;
+            if (local % 86400 < 0) { dn -= 1; }
+            self.dayNum = dn;
+            let sod = (local - dn * 86400) as int;
+            // (Civil.date inlined: no array for every moment made)
+            let z = dn + 719468;
+            let era = (z >= 0 ? z : z - 146096) / 146097;
+            let doe = z - era * 146097;
+            let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+            let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+            let mp = (5 * doy + 2) / 153;
+            self.dy = (doy - (153 * mp + 2) / 5 + 1) as int;
+            self.mon = (mp < 10 ? mp + 3 : mp - 9) as int;
+            self.yr = yoe + era * 400 + (self.mon <= 2 ? 1 : 0);
+            self.hr = sod / 3600;
+            self.mn = (sod % 3600) / 60;
+            self.sc = sod % 60;
+        }
+
+        // ── making moments ──────────────────────────────────────────────────────
+        static fn zoneFor(tz: string) -> TimeZone {
+            if (tz != "") { return TimeZone.of(tz); }
+            if (Moment.defaultZone == null) { Moment.defaultZone = TimeZone.local(); }
+            return Moment.defaultZone;
+        }
+        // Sets the zone moments are made in by default ("UTC", "Africa/Nairobi").
+        static fn setDefaultTimezone(tz: string) { Moment.defaultZone = TimeZone.of(tz); }
+        // Now (the frozen time under setTestNow), in `tz` or the default zone.
+        static fn now(tz: string = "") -> Moment {
+            let z = Moment.zoneFor(tz);
+            if (Moment.testNow != null) { return Moment.testNow.inZone(z); }
+            let ms = Time.nowMs();
+            return new Moment(Civil.floorDiv(ms, 1000), (Civil.floorMod(ms, 1000) * 1000) as int, z);
+        }
+        static fn today(tz: string = "") -> Moment { return Moment.now(tz).startOfDay(); }
+        static fn tomorrow(tz: string = "") -> Moment { return Moment.now(tz).addDays(1).startOfDay(); }
+        static fn yesterday(tz: string = "") -> Moment { return Moment.now(tz).subDays(1).startOfDay(); }
+        // From calendar fields in `tz`; fields out of range roll over (month 13 = next January).
+        static fn create(year: long, month: int = 1, day: int = 1, hour: int = 0, minute: int = 0, second: int = 0, tz: string = "") -> Moment {
+            return Moment.fromLocal(year, month, day, hour, minute, second, 0, Moment.zoneFor(tz));
+        }
+        // A date at midnight.
+        static fn createFromDate(year: long, month: int, day: int, tz: string = "") -> Moment { return Moment.create(year, month, day, 0, 0, 0, tz); }
+        // Today at a time.
+        static fn createFromTime(hour: int, minute: int = 0, second: int = 0, tz: string = "") -> Moment {
+            return Moment.today(tz).setTime(hour, minute, second);
+        }
+        // Like create(), but a ValueError for a field out of range (Feb 30, hour 24).
+        static fn createSafe(year: long, month: int, day: int, hour: int = 0, minute: int = 0, second: int = 0, tz: string = "") -> Moment {
+            if (month < 1 || month > 12) { throw new ValueError("month ${month} is not 1-12"); }
+            if (day < 1 || day > Civil.daysInMonth(year, month)) { throw new ValueError("day ${day} is not in ${year}-${month}"); }
+            if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) { throw new ValueError("${hour}:${minute}:${second} is not a time"); }
+            return Moment.create(year, month, day, hour, minute, second, tz);
+        }
+        static fn fromUnix(seconds: long, tz: string = "") -> Moment { return new Moment(seconds, 0, Moment.zoneFor(tz)); }
+        static fn fromUnixMs(ms: long, tz: string = "") -> Moment { return new Moment(Civil.floorDiv(ms, 1000), (Civil.floorMod(ms, 1000) * 1000) as int, Moment.zoneFor(tz)); }
+        static fn fromUnixMicros(us: long, tz: string = "") -> Moment { return new Moment(Civil.floorDiv(us, 1000000), Civil.floorMod(us, 1000000) as int, Moment.zoneFor(tz)); }
+        static fn fromDateTime(d: DateTime, tz: string = "") -> Moment { return new Moment(d.unix(), d.micros(), Moment.zoneFor(tz)); }
+        static fn fromLocal(year: long, month: int, day: int, hour: int, minute: int, second: int, micros: int, zone: TimeZone) -> Moment {
+            // (months and seconds out of range carry, as mktime does)
+            let m0 = (month as long) - 1;
+            let y = year + Civil.floorDiv(m0, 12);
+            let m = (Civil.floorMod(m0, 12) + 1) as int;
+            let days = Civil.days(y, m, 1) + (day as long) - 1;
+            let local = days * 86400 + (hour as long) * 3600 + (minute as long) * 60 + (second as long);
+            return new Moment(zone.toUnix(local), micros, zone);
+        }
+
+        // Freezes now() (and every relative parse) at `m`; null goes back to the real clock.
+        static fn setTestNow(m: Moment) { Moment.testNow = m; }
+        static fn hasTestNow() -> bool { return Moment.testNow != null; }
+        // Freezes the clock at the current moment; returns it.
+        static fn freeze() -> Moment { Moment.testNow = null; let n = Moment.now(); Moment.testNow = n; return n; }
+        // Moves the frozen clock (freezing it first) by `amount` of `unit`: travel(5, "minutes").
+        static fn travel(amount: long, unit: string) -> Moment {
+            let base = Moment.testNow != null ? Moment.testNow : Moment.now();
+            Moment.testNow = base.add(amount, unit);
+            return Moment.testNow;
+        }
+        static fn travelTo(m: Moment) { Moment.testNow = m; }
+        static fn travelBack() { Moment.testNow = null; }
+
+        // ── parsing ─────────────────────────────────────────────────────────────
+        // ISO 8601 ("2026-11-14", "2026-11-14 09:30", "2026-11-14T09:30:15.25+03:00"),
+        // "@1700000000", or relative English: "now", "tomorrow 9am", "+2 weeks",
+        // "3 days ago", "next friday", "last day of next month", "monday 17:30",
+        // "March 5 2026", "5 March", "noon". A time without a zone is wall time in `tz`.
+        // ValueError for anything else.
+        static fn parse(text: string, tz: string = "") -> Moment {
+            let m = Moment.tryParse(text, tz);
+            if (m == null) { throw new ValueError("not a date or time: '" + text + "'"); }
+            return m;
+        }
+        // As parse, but null for text it cannot read.
+        static fn tryParse(text: string, tz: string = "") -> Moment {
+            let zone = Moment.zoneFor(tz);
+            let t = Str.trim(text);
+            if (t == "") { return null; }
+            if (Str.startsWith(t, "@")) {
+                let n = Integer.parseOr(t[1..], -1);
+                return Str.isDigits(t[1..]) ? new Moment(n, 0, zone) : null;
+            }
+            let iso = Moment.parseIso(t, zone);
+            if (iso != null) { return iso; }
+            return new RelativeParser(Str.lower(t), zone).run();
+        }
+        private static fn digits(t: string, at: int, n: int) -> int {
+            if (at + n > t.length) { return -1; }
+            let v = 0;
+            for (i in at..(at + n)) {
+                let c = t[i] as int;
+                if (c < 48 || c > 57) { return -1; }
+                v = v * 10 + (c - 48);
+            }
+            return v;
+        }
+        // YYYY-MM-DD[( |T)HH:MM[:SS[.f]]][Z|±HH[:MM]]; null when it is not that.
+        static fn parseIso(t: string, zone: TimeZone) -> Moment {
+            let y = Moment.digits(t, 0, 4);
+            if (y < 0 || t.length < 10 || t[4] as int != 45 || t[7] as int != 45) { return null; }
+            let mo = Moment.digits(t, 5, 2);
+            let d = Moment.digits(t, 8, 2);
+            if (mo < 1 || mo > 12 || d < 1 || d > Civil.daysInMonth(y as long, mo)) { return null; }
+            let h = 0;
+            let mi = 0;
+            let s = 0;
+            let us = 0;
+            let p = 10;
+            if (p < t.length && (t[p] as int == 84 || t[p] as int == 116 || t[p] as int == 32)) {
+                h = Moment.digits(t, p + 1, 2);
+                if (h < 0 || p + 3 >= t.length || t[p + 3] as int != 58) { return null; }
+                mi = Moment.digits(t, p + 4, 2);
+                if (mi < 0) { return null; }
+                p += 6;
+                if (p < t.length && t[p] as int == 58) {
+                    s = Moment.digits(t, p + 1, 2);
+                    if (s < 0) { return null; }
+                    p += 3;
+                    if (p < t.length && (t[p] as int == 46 || t[p] as int == 44)) {
+                        p += 1;
+                        let k = 0;
+                        while (p < t.length && t[p] as int >= 48 && t[p] as int <= 57) {
+                            if (k < 6) { us = us * 10 + (t[p] as int - 48); k += 1; }
+                            p += 1;
+                        }
+                        if (k == 0) { return null; }
+                        while (k < 6) { us *= 10; k += 1; }
+                    }
+                }
+                if (h > 23 || mi > 59 || s > 60) { return null; }
+            }
+            while (p < t.length && t[p] as int == 32) { p += 1; }
+            if (p == t.length) { return Moment.fromLocal(y as long, mo, d, h, mi, s, us, zone); }
+            let rest = t[p..];
+            let off = 0;
+            if (rest == "Z" || rest == "z" || Str.upper(rest) == "UTC") { off = 0; }
+            else {
+                off = TimeZone.parseOffset(rest);
+                if (off == -999999) {
+                    let named = TimeZone.tryOf(rest);
+                    if (named == null) { return null; }
+                    return Moment.fromLocal(y as long, mo, d, h, mi, s, us, named).inZone(zone);
+                }
+            }
+            let local = Civil.days(y as long, mo, d) * 86400 + (h as long) * 3600 + (mi as long) * 60 + (s as long);
+            return new Moment(local - (off as long), us, zone);
+        }
+        // Reads `text` laid out as `format` (PHP's letters: d j m n Y y H G h g i s
+        // u v A a D l M F U e O P T, and `\` for a literal). Fields the format does
+        // not give are now's, unless it starts with `!` (then 1970-01-01 00:00:00)
+        // or holds `|` (fields after it are reset). ValueError when it does not fit.
+        static fn createFromFormat(format: string, text: string, tz: string = "") -> Moment {
+            let m = new FormatReader(format, text, Moment.zoneFor(tz)).run();
+            if (m == null) { throw new ValueError("'" + text + "' does not match the format '" + format + "'"); }
+            return m;
+        }
+        static fn tryCreateFromFormat(format: string, text: string, tz: string = "") -> Moment {
+            return new FormatReader(format, text, Moment.zoneFor(tz)).run();
+        }
+        // Whether `text` is a date parse() reads.
+        static fn isValid(text: string) -> bool { return Moment.tryParse(text) != null; }
+
+        // ── fields ──────────────────────────────────────────────────────────────
+        fn year() -> long { return self.yr; }
+        fn month() -> int { return self.mon; }
+        fn day() -> int { return self.dy; }
+        fn hour() -> int { return self.hr; }
+        fn minute() -> int { return self.mn; }
+        fn second() -> int { return self.sc; }
+        fn micro() -> int { return self.us; }
+        fn milli() -> int { return self.us / 1000; }
+        // 0 = Sunday … 6 = Saturday (as Carbon's dayOfWeek).
+        fn dayOfWeek() -> int { return Civil.weekday(self.dayNum); }
+        // 1 = Monday … 7 = Sunday.
+        fn isoWeekday() -> int { let w = Civil.weekday(self.dayNum); return w == 0 ? 7 : w; }
+        // 1..366.
+        fn dayOfYear() -> int { return (self.dayNum - Civil.days(self.yr, 1, 1) + 1) as int; }
+        // The ISO 8601 week (1..53) and its year (which can differ near New Year).
+        fn isoWeek() -> int {
+            let thursday = self.dayNum - (self.isoWeekday() as long - 4);
+            let ty = Civil.date(thursday)[0];
+            return ((thursday - Civil.days(ty, 1, 1)) / 7 + 1) as int;
+        }
+        fn isoWeekYear() -> long { return Civil.date(self.dayNum - (self.isoWeekday() as long - 4))[0]; }
+        // The week of the month as Carbon counts it: days 1-7 are week 1, 8-14 week 2 …
+        fn weekOfMonth() -> int { return (self.dy - 1) / 7 + 1; }
+        // The row of a month calendar the day is on (1..6, weeks starting on weekStartsAt).
+        fn weekNumberInMonth() -> int {
+            let first = Civil.days(self.yr, self.mon, 1);
+            let lead = (Civil.weekday(first) - (Moment.weekStartsAt % 7) + 7) % 7;
+            return (self.dy + lead - 1) / 7 + 1;
+        }
+        fn quarter() -> int { return (self.mon - 1) / 3 + 1; }
+        fn daysInMonth() -> int { return Civil.daysInMonth(self.yr, self.mon); }
+        fn daysInYear() -> int { return Civil.isLeap(self.yr) ? 366 : 365; }
+        fn weeksInYear() -> int { return Moment.fromLocal(self.yr, 12, 28, 0, 0, 0, 0, self.zone).isoWeek(); }
+        fn isLeapYear() -> bool { return Civil.isLeap(self.yr); }
+        // Seconds east of UTC here and now.
+        fn offset() -> int { return self.off; }
+        fn offsetHours() -> int { return self.off / 3600; }
+        fn offsetMinutes() -> int { return self.off / 60; }
+        fn timezone() -> TimeZone { return self.zone; }
+        fn tzName() -> string { return self.zone.name; }
+        // "EAT", "EDT".
+        fn tzAbbreviation() -> string { return self.zone.abbreviationAt(self.ts); }
+        fn isDst() -> bool { return self.zone.isDstAt(self.ts); }
+        fn isUtc() -> bool { return self.off == 0; }
+        fn isLocal() -> bool { return self.zone == TimeZone.local(); }
+        fn unix() -> long { return self.ts; }
+        fn timestamp() -> long { return self.ts; }
+        fn unixMs() -> long { return self.ts * 1000 + (self.us / 1000) as long; }
+        fn unixMicros() -> long { return self.ts * 1000000 + (self.us as long); }
+        // Seconds since local midnight.
+        fn secondsSinceMidnight() -> int { return self.hr * 3600 + self.mn * 60 + self.sc; }
+        fn secondsUntilEndOfDay() -> int { return 86399 - self.secondsSinceMidnight(); }
+        // The value of a unit by name ("year", "dayOfWeek", "quarter", …).
+        fn get(unit: string) -> long {
+            let u = Units.normalize(unit);
+            if (u == "year") { return self.yr; }
+            if (u == "month") { return self.mon as long; }
+            if (u == "day") { return self.dy as long; }
+            if (u == "hour") { return self.hr as long; }
+            if (u == "minute") { return self.mn as long; }
+            if (u == "second") { return self.sc as long; }
+            if (u == "microsecond") { return self.us as long; }
+            if (u == "millisecond") { return (self.us / 1000) as long; }
+            if (u == "week") { return self.isoWeek() as long; }
+            if (u == "quarter") { return self.quarter() as long; }
+            if (unit == "dayOfWeek") { return self.dayOfWeek() as long; }
+            if (unit == "dayOfYear") { return self.dayOfYear() as long; }
+            throw new ValueError("unknown unit '" + unit + "'");
+        }
+
+        // ── changing (each returns a new moment) ────────────────────────────────
+        fn setDate(year: long, month: int, day: int) -> Moment { return Moment.fromLocal(year, month, day, self.hr, self.mn, self.sc, self.us, self.zone); }
+        fn setTime(hour: int, minute: int = 0, second: int = 0, micro: int = 0) -> Moment { return Moment.fromLocal(self.yr, self.mon, self.dy, hour, minute, second, micro, self.zone); }
+        fn setDateTime(year: long, month: int, day: int, hour: int, minute: int, second: int = 0) -> Moment { return Moment.fromLocal(year, month, day, hour, minute, second, 0, self.zone); }
+        // "14:30" or "14:30:15".
+        fn setTimeFromTimeString(time: string) -> Moment {
+            let p = Str.split(Str.trim(time), ":");
+            let h = p.size() > 0 ? Integer.parseOr(p[0], 0) as int : 0;
+            let m = p.size() > 1 ? Integer.parseOr(p[1], 0) as int : 0;
+            let s = p.size() > 2 ? Integer.parseOr(p[2], 0) as int : 0;
+            return self.setTime(h, m, s);
+        }
+        fn setYear(v: long) -> Moment { return self.setDate(v, self.mon, self.dy); }
+        fn setMonth(v: int) -> Moment { return self.setDate(self.yr, v, self.dy); }
+        fn setDay(v: int) -> Moment { return self.setDate(self.yr, self.mon, v); }
+        fn setHour(v: int) -> Moment { return self.setTime(v, self.mn, self.sc, self.us); }
+        fn setMinute(v: int) -> Moment { return self.setTime(self.hr, v, self.sc, self.us); }
+        fn setSecond(v: int) -> Moment { return self.setTime(self.hr, self.mn, v, self.us); }
+        fn setMicro(v: int) -> Moment { return new Moment(self.ts, v, self.zone); }
+        // A unit by name: set("hour", 9).
+        fn set(unit: string, value: long) -> Moment {
+            let u = Units.normalize(unit);
+            if (u == "year") { return self.setYear(value); }
+            if (u == "month") { return self.setMonth(value as int); }
+            if (u == "day") { return self.setDay(value as int); }
+            if (u == "hour") { return self.setHour(value as int); }
+            if (u == "minute") { return self.setMinute(value as int); }
+            if (u == "second") { return self.setSecond(value as int); }
+            if (u == "microsecond") { return self.setMicro(value as int); }
+            throw new ValueError("cannot set '" + unit + "'");
+        }
+        // The same moment, seen in another zone.
+        fn inZone(z: TimeZone) -> Moment { return z == self.zone ? self : new Moment(self.ts, self.us, z); }
+        fn setTimezone(tz: string) -> Moment { return self.inZone(TimeZone.of(tz)); }
+        fn tz(tz: string) -> Moment { return self.inZone(TimeZone.of(tz)); }
+        fn utc() -> Moment { return self.inZone(TimeZone.utc()); }
+        fn toLocal() -> Moment { return self.inZone(TimeZone.local()); }
+        // The same wall-clock time in another zone (a different moment).
+        fn shiftTimezone(tz: string) -> Moment { return Moment.fromLocal(self.yr, self.mon, self.dy, self.hr, self.mn, self.sc, self.us, TimeZone.of(tz)); }
+        fn copy() -> Moment { return new Moment(self.ts, self.us, self.zone); }
+
+        // ── arithmetic ──────────────────────────────────────────────────────────
+        // Seconds, minutes and hours are real time; days and longer are calendar
+        // time (a day across a DST change is 23 or 25 hours, and 09:00 stays 09:00).
+        fn addMicros(n: long) -> Moment { let t = self.unixMicros() + n; return new Moment(Civil.floorDiv(t, 1000000), Civil.floorMod(t, 1000000) as int, self.zone); }
+        fn addMillis(n: long) -> Moment { return self.addMicros(n * 1000); }
+        fn addSeconds(n: long) -> Moment { return new Moment(self.ts + n, self.us, self.zone); }
+        fn addMinutes(n: long) -> Moment { return self.addSeconds(n * 60); }
+        fn addHours(n: long) -> Moment { return self.addSeconds(n * 3600); }
+        fn addDays(n: long) -> Moment {
+            let local = (self.dayNum + n) * 86400 + (self.secondsSinceMidnight() as long);
+            return new Moment(self.zone.toUnix(local), self.us, self.zone);
+        }
+        fn addWeeks(n: long) -> Moment { return self.addDays(n * 7); }
+        // Months without overflow: Jan 31 + 1 month = Feb 28 (or 29).
+        fn addMonths(n: long) -> Moment {
+            let total = self.yr * 12 + (self.mon as long) - 1 + n;
+            let y = Civil.floorDiv(total, 12);
+            let m = (Civil.floorMod(total, 12) + 1) as int;
+            let last = Civil.daysInMonth(y, m);
+            return Moment.fromLocal(y, m, self.dy > last ? last : self.dy, self.hr, self.mn, self.sc, self.us, self.zone);
+        }
+        // Months as PHP adds them: Jan 31 + 1 month = Mar 3.
+        fn addMonthsWithOverflow(n: long) -> Moment {
+            let total = self.yr * 12 + (self.mon as long) - 1 + n;
+            return Moment.fromLocal(Civil.floorDiv(total, 12), (Civil.floorMod(total, 12) + 1) as int, self.dy, self.hr, self.mn, self.sc, self.us, self.zone);
+        }
+        fn addQuarters(n: long) -> Moment { return self.addMonths(n * 3); }
+        fn addYears(n: long) -> Moment { return self.addMonths(n * 12); }
+        fn addDecades(n: long) -> Moment { return self.addMonths(n * 120); }
+        fn addCenturies(n: long) -> Moment { return self.addMonths(n * 1200); }
+        // Business days: Saturdays and Sundays are skipped.
+        fn addWeekdays(n: long) -> Moment {
+            let step = n < 0 ? -1 : 1;
+            let left = n < 0 ? -n : n;
+            let d = self;
+            while (left > 0) {
+                d = d.addDays(step as long);
+                if (!d.isWeekend()) { left -= 1; }
+            }
+            return d;
+        }
+        // One of a unit: addDay(), subMonth().
+        fn addSecond() -> Moment { return self.addSeconds(1); }
+        fn subSecond() -> Moment { return self.subSeconds(1); }
+        fn addMinute() -> Moment { return self.addMinutes(1); }
+        fn subMinute() -> Moment { return self.subMinutes(1); }
+        fn addHour() -> Moment { return self.addHours(1); }
+        fn subHour() -> Moment { return self.subHours(1); }
+        fn addDay() -> Moment { return self.addDays(1); }
+        fn subDay() -> Moment { return self.subDays(1); }
+        fn addWeekday() -> Moment { return self.addWeekdays(1); }
+        fn subWeekday() -> Moment { return self.subWeekdays(1); }
+        fn addWeek() -> Moment { return self.addWeeks(1); }
+        fn subWeek() -> Moment { return self.subWeeks(1); }
+        fn addMonth() -> Moment { return self.addMonths(1); }
+        fn subMonth() -> Moment { return self.subMonths(1); }
+        fn addQuarter() -> Moment { return self.addQuarters(1); }
+        fn subQuarter() -> Moment { return self.subQuarters(1); }
+        fn addYear() -> Moment { return self.addYears(1); }
+        fn subYear() -> Moment { return self.subYears(1); }
+        fn subMicros(n: long) -> Moment { return self.addMicros(-n); }
+        fn subMillis(n: long) -> Moment { return self.addMillis(-n); }
+        fn subSeconds(n: long) -> Moment { return self.addSeconds(-n); }
+        fn subMinutes(n: long) -> Moment { return self.addMinutes(-n); }
+        fn subHours(n: long) -> Moment { return self.addHours(-n); }
+        fn subDays(n: long) -> Moment { return self.addDays(-n); }
+        fn subWeeks(n: long) -> Moment { return self.addWeeks(-n); }
+        fn subMonths(n: long) -> Moment { return self.addMonths(-n); }
+        fn subQuarters(n: long) -> Moment { return self.addQuarters(-n); }
+        fn subYears(n: long) -> Moment { return self.addYears(-n); }
+        fn subWeekdays(n: long) -> Moment { return self.addWeekdays(-n); }
+        // add(3, "days"), add(-1, "month"), add(90, "minutes").
+        fn add(amount: long, unit: string) -> Moment {
+            let u = Units.normalize(unit);
+            if (u == "microsecond") { return self.addMicros(amount); }
+            if (u == "millisecond") { return self.addMillis(amount); }
+            if (u == "second") { return self.addSeconds(amount); }
+            if (u == "minute") { return self.addMinutes(amount); }
+            if (u == "hour") { return self.addHours(amount); }
+            if (u == "day") { return self.addDays(amount); }
+            if (u == "weekday") { return self.addWeekdays(amount); }
+            if (u == "week") { return self.addWeeks(amount); }
+            if (u == "month") { return self.addMonths(amount); }
+            if (u == "quarter") { return self.addQuarters(amount); }
+            if (u == "year") { return self.addYears(amount); }
+            if (u == "decade") { return self.addDecades(amount); }
+            if (u == "century") { return self.addCenturies(amount); }
+            if (u == "millennium") { return self.addYears(amount * 1000); }
+            throw new ValueError("unknown unit '" + unit + "'");
+        }
+        fn sub(amount: long, unit: string) -> Moment { return self.add(-amount, unit); }
+        // The moment plus an Interval (its calendar parts, then its time parts).
+        fn plus(i: Interval) -> Moment {
+            let sign = i.invert ? -1 as long : 1 as long;
+            let d = self;
+            if (i.years != 0 || i.months != 0) { d = d.addMonths(sign * (i.years * 12 + i.months)); }
+            if (i.days != 0) { d = d.addDays(sign * i.days); }
+            let secs = i.hours * 3600 + i.minutes * 60 + i.seconds;
+            if (secs != 0) { d = d.addSeconds(sign * secs); }
+            if (i.micros != 0) { d = d.addMicros(sign * i.micros); }
+            return d;
+        }
+        fn minus(i: Interval) -> Moment { return self.plus(i.negated()); }
+
+        // ── start and end of units ──────────────────────────────────────────────
+        fn startOfSecond() -> Moment { return new Moment(self.ts, 0, self.zone); }
+        fn endOfSecond() -> Moment { return new Moment(self.ts, 999999, self.zone); }
+        fn startOfMinute() -> Moment { return self.setTime(self.hr, self.mn, 0, 0); }
+        fn endOfMinute() -> Moment { return self.setTime(self.hr, self.mn, 59, 999999); }
+        fn startOfHour() -> Moment { return self.setTime(self.hr, 0, 0, 0); }
+        fn endOfHour() -> Moment { return self.setTime(self.hr, 59, 59, 999999); }
+        fn startOfDay() -> Moment { return self.setTime(0, 0, 0, 0); }
+        fn endOfDay() -> Moment { return self.setTime(23, 59, 59, 999999); }
+        fn midDay() -> Moment { return self.setTime(12, 0, 0, 0); }
+        fn startOfWeek(weekStartsAt: int = 0) -> Moment {
+            let first = weekStartsAt == 0 ? Moment.weekStartsAt : weekStartsAt;
+            let back = (self.isoWeekday() - first + 7) % 7;
+            return self.subDays(back as long).startOfDay();
+        }
+        fn endOfWeek(weekStartsAt: int = 0) -> Moment { return self.startOfWeek(weekStartsAt).addDays(6).endOfDay(); }
+        fn startOfMonth() -> Moment { return Moment.fromLocal(self.yr, self.mon, 1, 0, 0, 0, 0, self.zone); }
+        fn endOfMonth() -> Moment { return Moment.fromLocal(self.yr, self.mon, self.daysInMonth(), 23, 59, 59, 999999, self.zone); }
+        fn startOfQuarter() -> Moment { return Moment.fromLocal(self.yr, (self.quarter() - 1) * 3 + 1, 1, 0, 0, 0, 0, self.zone); }
+        fn endOfQuarter() -> Moment { return self.startOfQuarter().addMonths(2).endOfMonth(); }
+        fn startOfYear() -> Moment { return Moment.fromLocal(self.yr, 1, 1, 0, 0, 0, 0, self.zone); }
+        fn endOfYear() -> Moment { return Moment.fromLocal(self.yr, 12, 31, 23, 59, 59, 999999, self.zone); }
+        fn startOfDecade() -> Moment { return Moment.fromLocal(self.yr - Civil.floorMod(self.yr, 10), 1, 1, 0, 0, 0, 0, self.zone); }
+        fn endOfDecade() -> Moment { return Moment.fromLocal(self.yr - Civil.floorMod(self.yr, 10) + 9, 12, 31, 23, 59, 59, 999999, self.zone); }
+        fn startOfCentury() -> Moment { return Moment.fromLocal(self.yr - Civil.floorMod(self.yr - 1, 100), 1, 1, 0, 0, 0, 0, self.zone); }
+        fn endOfCentury() -> Moment { return self.startOfCentury().addYears(99).endOfYear(); }
+        // startOf("week"), endOf("quarter").
+        fn startOf(unit: string) -> Moment {
+            let u = Units.normalize(unit);
+            if (u == "second") { return self.startOfSecond(); }
+            if (u == "minute") { return self.startOfMinute(); }
+            if (u == "hour") { return self.startOfHour(); }
+            if (u == "day") { return self.startOfDay(); }
+            if (u == "week") { return self.startOfWeek(); }
+            if (u == "month") { return self.startOfMonth(); }
+            if (u == "quarter") { return self.startOfQuarter(); }
+            if (u == "year") { return self.startOfYear(); }
+            if (u == "decade") { return self.startOfDecade(); }
+            if (u == "century") { return self.startOfCentury(); }
+            throw new ValueError("unknown unit '" + unit + "'");
+        }
+        fn endOf(unit: string) -> Moment {
+            let u = Units.normalize(unit);
+            if (u == "second") { return self.endOfSecond(); }
+            if (u == "minute") { return self.endOfMinute(); }
+            if (u == "hour") { return self.endOfHour(); }
+            if (u == "day") { return self.endOfDay(); }
+            if (u == "week") { return self.endOfWeek(); }
+            if (u == "month") { return self.endOfMonth(); }
+            if (u == "quarter") { return self.endOfQuarter(); }
+            if (u == "year") { return self.endOfYear(); }
+            if (u == "decade") { return self.endOfDecade(); }
+            if (u == "century") { return self.endOfCentury(); }
+            throw new ValueError("unknown unit '" + unit + "'");
+        }
+        // Rounded down, up or to the nearest `precision` of a unit up to a day:
+        // floor("minute", 15) is the quarter hour it is in.
+        fn floor(unit: string, precision: long = 1) -> Moment { return self.roundBy(unit, precision, 0); }
+        fn ceil(unit: string, precision: long = 1) -> Moment { return self.roundBy(unit, precision, 2); }
+        fn round(unit: string, precision: long = 1) -> Moment { return self.roundBy(unit, precision, 1); }
+        private fn roundBy(unit: string, precision: long, how: int) -> Moment {
+            let u = Units.normalize(unit);
+            let size = Units.seconds(u) * (precision < 1 ? 1 : precision);
+            if (size <= 0 || size > 86400 * 7) { throw new ValueError("cannot round to '" + unit + "'"); }
+            // (in local time, so rounding to a day lands on local midnight)
+            let local = self.ts + (self.off as long);
+            let us = (local * 1000000 + (self.us as long));
+            let unitUs = size * 1000000;
+            let down = Civil.floorDiv(us, unitUs) * unitUs;
+            let target = down;
+            if (how == 2 && down != us) { target = down + unitUs; }
+            if (how == 1 && us - down >= unitUs / 2) { target = down + unitUs; }
+            return new Moment(self.zone.toUnix(Civil.floorDiv(target, 1000000)), Civil.floorMod(target, 1000000) as int, self.zone);
+        }
+
+        // ── weekdays ────────────────────────────────────────────────────────────
+        // The next `weekday` (0 = Sunday … 6 = Saturday; -1: tomorrow) strictly after this day, at midnight.
+        fn next(weekday: int = -1) -> Moment {
+            if (weekday < 0) { return self.addDays(1).startOfDay(); }
+            let ahead = (weekday - self.dayOfWeek() + 7) % 7;
+            return self.addDays((ahead == 0 ? 7 : ahead) as long).startOfDay();
+        }
+        // The last `weekday` strictly before this day, at midnight.
+        fn previous(weekday: int = -1) -> Moment {
+            if (weekday < 0) { return self.subDays(1).startOfDay(); }
+            let back = (self.dayOfWeek() - weekday + 7) % 7;
+            return self.subDays((back == 0 ? 7 : back) as long).startOfDay();
+        }
+        fn nextWeekday() -> Moment { return self.addWeekdays(1); }
+        fn previousWeekday() -> Moment { return self.subWeekdays(1); }
+        fn nextWeekendDay() -> Moment { let d = self.addDays(1); while (!d.isWeekend()) { d = d.addDays(1); } return d; }
+        fn previousWeekendDay() -> Moment { let d = self.subDays(1); while (!d.isWeekend()) { d = d.subDays(1); } return d; }
+        // The first (or a given weekday's first) day of the month, at midnight.
+        fn firstOfMonth(weekday: int = -1) -> Moment {
+            let first = self.startOfMonth();
+            if (weekday < 0) { return first; }
+            return first.addDays(((weekday - first.dayOfWeek() + 7) % 7) as long);
+        }
+        fn lastOfMonth(weekday: int = -1) -> Moment {
+            let last = self.endOfMonth().startOfDay();
+            if (weekday < 0) { return last; }
+            return last.subDays(((last.dayOfWeek() - weekday + 7) % 7) as long);
+        }
+        // The nth `weekday` of the month (nthOfMonth(2, 2): the second Tuesday), or null when the month has none.
+        fn nthOfMonth(n: int, weekday: int) -> Moment {
+            let d = self.firstOfMonth(weekday).addWeeks((n - 1) as long);
+            return d.mon == self.mon ? d : null;
+        }
+        fn firstOfQuarter() -> Moment { return self.startOfQuarter(); }
+        fn lastOfQuarter() -> Moment { return self.endOfQuarter().startOfDay(); }
+        fn firstOfYear() -> Moment { return self.startOfYear(); }
+        fn lastOfYear() -> Moment { return self.endOfYear().startOfDay(); }
+
+        // ── comparing ───────────────────────────────────────────────────────────
+        fn compareTo(o: Moment) -> int {
+            if (self.ts != o.ts) { return self.ts < o.ts ? -1 : 1; }
+            return self.us == o.us ? 0 : (self.us < o.us ? -1 : 1);
+        }
+        fn operator==(o: Moment) -> bool { return o != null && self.ts == o.ts && self.us == o.us; }
+        fn operator<(o: Moment) -> bool { return self.compareTo(o) < 0; }
+        fn operator<=(o: Moment) -> bool { return self.compareTo(o) <= 0; }
+        fn operator>(o: Moment) -> bool { return self.compareTo(o) > 0; }
+        fn operator>=(o: Moment) -> bool { return self.compareTo(o) >= 0; }
+        fn eq(o: Moment) -> bool { return self.compareTo(o) == 0; }
+        fn ne(o: Moment) -> bool { return self.compareTo(o) != 0; }
+        fn gt(o: Moment) -> bool { return self.compareTo(o) > 0; }
+        fn gte(o: Moment) -> bool { return self.compareTo(o) >= 0; }
+        fn lt(o: Moment) -> bool { return self.compareTo(o) < 0; }
+        fn lte(o: Moment) -> bool { return self.compareTo(o) <= 0; }
+        fn isBefore(o: Moment) -> bool { return self.lt(o); }
+        fn isAfter(o: Moment) -> bool { return self.gt(o); }
+        fn between(a: Moment, b: Moment, inclusive: bool = true) -> bool {
+            let lo = a.lte(b) ? a : b;
+            let hi = a.lte(b) ? b : a;
+            return inclusive ? self.gte(lo) && self.lte(hi) : self.gt(lo) && self.lt(hi);
+        }
+        fn betweenIncluded(a: Moment, b: Moment) -> bool { return self.between(a, b, true); }
+        fn betweenExcluded(a: Moment, b: Moment) -> bool { return self.between(a, b, false); }
+        fn isPast() -> bool { return self.lt(Moment.now()); }
+        fn isFuture() -> bool { return self.gt(Moment.now()); }
+        fn isNowOrPast() -> bool { return self.lte(Moment.now()); }
+        fn isNowOrFuture() -> bool { return self.gte(Moment.now()); }
+        // Same calendar unit, in this moment's zone.
+        fn isSameDay(o: Moment) -> bool { let x = o.inZone(self.zone); return x.dayNum == self.dayNum; }
+        fn isSameMonth(o: Moment, ofSameYear: bool = true) -> bool { let x = o.inZone(self.zone); return x.mon == self.mon && (!ofSameYear || x.yr == self.yr); }
+        fn isSameYear(o: Moment) -> bool { return o.inZone(self.zone).yr == self.yr; }
+        fn isSameQuarter(o: Moment, ofSameYear: bool = true) -> bool { let x = o.inZone(self.zone); return x.quarter() == self.quarter() && (!ofSameYear || x.yr == self.yr); }
+        fn isSameWeek(o: Moment) -> bool { return self.startOfWeek() == o.inZone(self.zone).startOfWeek(); }
+        fn isSameHour(o: Moment) -> bool { return Civil.floorDiv(self.ts, 3600) == Civil.floorDiv(o.ts, 3600) && self.isSameDay(o); }
+        fn isSameMinute(o: Moment) -> bool { return Civil.floorDiv(self.ts, 60) == Civil.floorDiv(o.ts, 60); }
+        // Whether both look the same in a format: isSameAs("Y-m", other).
+        fn isSameAs(format: string, o: Moment) -> bool { return self.format(format) == o.inZone(self.zone).format(format); }
+        fn isSameUnit(unit: string, o: Moment) -> bool { return self.startOf(unit) == o.inZone(self.zone).startOf(unit); }
+        fn isToday() -> bool { return self.isSameDay(Moment.now()); }
+        fn isTomorrow() -> bool { return self.isSameDay(Moment.now().addDays(1)); }
+        fn isYesterday() -> bool { return self.isSameDay(Moment.now().subDays(1)); }
+        fn isCurrentWeek() -> bool { return self.isSameWeek(Moment.now()); }
+        fn isCurrentMonth() -> bool { return self.isSameMonth(Moment.now()); }
+        fn isCurrentYear() -> bool { return self.isSameYear(Moment.now()); }
+        fn isNextWeek() -> bool { return self.isSameWeek(Moment.now().addWeeks(1)); }
+        fn isLastWeek() -> bool { return self.isSameWeek(Moment.now().subWeeks(1)); }
+        fn isNextMonth() -> bool { return self.isSameMonth(Moment.now().addMonths(1)); }
+        fn isLastMonth() -> bool { return self.isSameMonth(Moment.now().subMonths(1)); }
+        fn isNextYear() -> bool { return self.yr == Moment.now().inZone(self.zone).yr + 1; }
+        fn isLastYear() -> bool { return self.yr == Moment.now().inZone(self.zone).yr - 1; }
+        fn isWeekend() -> bool { let w = self.dayOfWeek(); return w == 0 || w == 6; }
+        fn isWeekday() -> bool { return !self.isWeekend(); }
+        fn isMonday() -> bool { return self.dayOfWeek() == 1; }
+        fn isTuesday() -> bool { return self.dayOfWeek() == 2; }
+        fn isWednesday() -> bool { return self.dayOfWeek() == 3; }
+        fn isThursday() -> bool { return self.dayOfWeek() == 4; }
+        fn isFriday() -> bool { return self.dayOfWeek() == 5; }
+        fn isSaturday() -> bool { return self.dayOfWeek() == 6; }
+        fn isSunday() -> bool { return self.dayOfWeek() == 0; }
+        fn isDayOfWeek(weekday: int) -> bool { return self.dayOfWeek() == weekday; }
+        fn isStartOfDay() -> bool { return self.hr == 0 && self.mn == 0 && self.sc == 0 && self.us == 0; }
+        fn isEndOfDay() -> bool { return self.hr == 23 && self.mn == 59 && self.sc == 59; }
+        fn isMidnight() -> bool { return self.isStartOfDay(); }
+        fn isMidday() -> bool { return self.hr == 12 && self.mn == 0 && self.sc == 0 && self.us == 0; }
+        fn isFirstOfMonth() -> bool { return self.dy == 1; }
+        fn isLastOfMonth() -> bool { return self.dy == self.daysInMonth(); }
+        // The same month and day as `o` (now by default).
+        fn isBirthday(o: Moment = null) -> bool { let x = (o == null ? Moment.now() : o).inZone(self.zone); return x.mon == self.mon && x.dy == self.dy; }
+        // Whether the ISO year has 53 weeks.
+        fn isLongYear() -> bool { return self.weeksInYear() == 53; }
+        fn min(o: Moment) -> Moment { return self.lte(o) ? self : o; }
+        fn max(o: Moment) -> Moment { return self.gte(o) ? self : o; }
+        fn closest(a: Moment, b: Moment) -> Moment { return Moment.absDiff(self, a) <= Moment.absDiff(self, b) ? a : b; }
+        fn farthest(a: Moment, b: Moment) -> Moment { return Moment.absDiff(self, a) >= Moment.absDiff(self, b) ? a : b; }
+        private static fn absDiff(a: Moment, b: Moment) -> long { let d = b.unixMicros() - a.unixMicros(); return d < 0 ? -d : d; }
+        static fn earliest(list: Array<Moment>) -> Moment { let out: Moment = null; for (m in list) { if (out == null || m.lt(out)) { out = m; } } return out; }
+        static fn latest(list: Array<Moment>) -> Moment { let out: Moment = null; for (m in list) { if (out == null || m.gt(out)) { out = m; } } return out; }
+
+        // ── differences ─────────────────────────────────────────────────────────
+        // From this moment to `o` (now by default): positive when `o` is later, or
+        // the size of the gap when `absolute`.
+        fn diffInMicros(o: Moment = null, absolute: bool = true) -> long { return Moment.signed(self.other(o).unixMicros() - self.unixMicros(), absolute); }
+        fn diffInMillis(o: Moment = null, absolute: bool = true) -> long { return self.diffInMicros(o, absolute) / 1000; }
+        fn diffInSeconds(o: Moment = null, absolute: bool = true) -> long { return self.diffInMicros(o, absolute) / 1000000; }
+        fn diffInMinutes(o: Moment = null, absolute: bool = true) -> long { return self.diffInSeconds(o, absolute) / 60; }
+        fn diffInHours(o: Moment = null, absolute: bool = true) -> long { return self.diffInSeconds(o, absolute) / 3600; }
+        // Whole calendar days (09:00 to 09:00 the next day is 1, across a DST change too).
+        fn diffInDays(o: Moment = null, absolute: bool = true) -> long {
+            let x = self.other(o).inZone(self.zone);
+            let days = x.dayNum - self.dayNum;
+            let tx = (x.secondsSinceMidnight() as long) * 1000000 + (x.us as long);
+            let ts = (self.secondsSinceMidnight() as long) * 1000000 + (self.us as long);
+            if (days > 0 && tx < ts) { days -= 1; }
+            if (days < 0 && tx > ts) { days += 1; }
+            return Moment.signed(days, absolute);
+        }
+        fn diffInWeeks(o: Moment = null, absolute: bool = true) -> long { return self.diffInDays(o, absolute) / 7; }
+        // Whole calendar months (Jan 31 to Feb 28 is 0; Jan 15 to Feb 15 is 1).
+        fn diffInMonths(o: Moment = null, absolute: bool = true) -> long {
+            let x = self.other(o).inZone(self.zone);
+            let months = (x.yr - self.yr) * 12 + (x.mon - self.mon) as long;
+            let restX = (x.dy as long) * 86400000000 + (x.secondsSinceMidnight() as long) * 1000000 + (x.us as long);
+            let restS = (self.dy as long) * 86400000000 + (self.secondsSinceMidnight() as long) * 1000000 + (self.us as long);
+            if (months > 0 && restX < restS) { months -= 1; }
+            if (months < 0 && restX > restS) { months += 1; }
+            return Moment.signed(months, absolute);
+        }
+        fn diffInQuarters(o: Moment = null, absolute: bool = true) -> long { return self.diffInMonths(o, absolute) / 3; }
+        fn diffInYears(o: Moment = null, absolute: bool = true) -> long { return self.diffInMonths(o, absolute) / 12; }
+        // Days that are not Saturday or Sunday, from this day up to (not including) `o`'s.
+        fn diffInWeekdays(o: Moment = null, absolute: bool = true) -> long {
+            let x = self.other(o).inZone(self.zone);
+            let a = self.dayNum < x.dayNum ? self.dayNum : x.dayNum;
+            let b = self.dayNum < x.dayNum ? x.dayNum : self.dayNum;
+            let n = 0 as long;
+            // (whole weeks at once, then the rest)
+            let weeks = (b - a) / 7;
+            n += weeks * 5;
+            let d = a + weeks * 7;
+            while (d < b) { let w = Civil.weekday(d); if (w != 0 && w != 6) { n += 1; } d += 1; }
+            return self.dayNum <= x.dayNum || absolute ? n : -n;
+        }
+        fn diffInWeekendDays(o: Moment = null, absolute: bool = true) -> long {
+            let x = self.other(o).inZone(self.zone);
+            return Moment.signed(x.dayNum - self.dayNum, true) - self.diffInWeekdays(o, true);
+        }
+        // diffIn("hours", other).
+        fn diffIn(unit: string, o: Moment = null, absolute: bool = true) -> long {
+            let u = Units.normalize(unit);
+            if (u == "microsecond") { return self.diffInMicros(o, absolute); }
+            if (u == "millisecond") { return self.diffInMillis(o, absolute); }
+            if (u == "second") { return self.diffInSeconds(o, absolute); }
+            if (u == "minute") { return self.diffInMinutes(o, absolute); }
+            if (u == "hour") { return self.diffInHours(o, absolute); }
+            if (u == "day") { return self.diffInDays(o, absolute); }
+            if (u == "weekday") { return self.diffInWeekdays(o, absolute); }
+            if (u == "week") { return self.diffInWeeks(o, absolute); }
+            if (u == "month") { return self.diffInMonths(o, absolute); }
+            if (u == "quarter") { return self.diffInQuarters(o, absolute); }
+            if (u == "year") { return self.diffInYears(o, absolute); }
+            throw new ValueError("unknown unit '" + unit + "'");
+        }
+        // The gap to `o` as years, months, days, hours, minutes, seconds (inverted when `o` is earlier).
+        fn diff(o: Moment = null) -> Interval {
+            let x = self.other(o).inZone(self.zone);
+            let early = self.lte(x) ? self : x;
+            let late = self.lte(x) ? x : self;
+            let i = new Interval();
+            // (whole months, then whole days from there, then the time left)
+            let months = early.diffInMonths(late, true);
+            let mid = early.addMonths(months);
+            let days = mid.diffInDays(late, true);
+            i.years = months / 12;
+            i.months = months % 12;
+            i.days = days;
+            let r = late.unixMicros() - mid.addDays(days).unixMicros();
+            i.hours = r / 3600000000;
+            i.minutes = (r / 60000000) % 60;
+            i.seconds = (r / 1000000) % 60;
+            i.micros = r % 1000000;
+            i.invert = x.lt(self);
+            i.totalDays = early.diffInDays(late, true);
+            return i;
+        }
+        private fn other(o: Moment) -> Moment { return o == null ? Moment.now(self.zone.name) : o; }
+        private static fn signed(v: long, absolute: bool) -> long { return absolute && v < 0 ? -v : v; }
+
+        // "3 days ago", "in 2 hours" (from now), "1 week before"/"after" (from
+        // `o`), or just "2 months" when `absolute`. `parts` units at most ("1 hour
+        // 5 minutes ago"); `short` writes "3d ago". Under a second is "just now".
+        fn diffForHumans(o: Moment = null, absolute: bool = false, short: bool = false, parts: int = 1) -> string {
+            let target = o == null ? Moment.now(self.zone.name) : o;
+            let i = target.diff(self);
+            let text = i.forHumans(short, parts);
+            if (text == "") { return absolute ? (short ? "0s" : "0 seconds") : "just now"; }
+            if (absolute) { return text; }
+            let later = self.gt(target);
+            if (o == null) { return later ? "in " + text : text + " ago"; }
+            return text + (later ? " after" : " before");
+        }
+        fn ago() -> string { return self.diffForHumans(); }
+        fn fromNow() -> string { return self.diffForHumans(); }
+        // "Today at 9:30 AM", "Yesterday at …", "Monday at …", "Last Friday at …", else the date.
+        fn calendar(o: Moment = null) -> string {
+            let ref = (o == null ? Moment.now(self.zone.name) : o).inZone(self.zone);
+            let days = ref.startOfDay().diffInDays(self.startOfDay(), false);
+            let at = " at " + self.format("g:i A");
+            if (days == 0) { return "Today" + at; }
+            if (days == 1) { return "Tomorrow" + at; }
+            if (days == -1) { return "Yesterday" + at; }
+            if (days > 1 && days < 7) { return self.format("l") + at; }
+            if (days < -1 && days > -7) { return "Last " + self.format("l") + at; }
+            return self.format("m/d/Y");
+        }
+
+        // ── formatting ──────────────────────────────────────────────────────────
+        // PHP date() letters: d D j l N S w z W F m M n t L o Y y a A g G h H i s
+        // u v e I O P p T Z c r U; `\` before a letter writes it as is.
+        fn format(fmt: string) -> string {
+            let sb = new StringBuilder();
+            let n = fmt.length;
+            let i = 0;
+            while (i < n) {
+                let c = fmt[i] as int;
+                if (c == 92 && i + 1 < n) { sb.appendChar(fmt[i + 1] as int); i += 2; continue; }
+                self.letter(sb, c);
+                i += 1;
+            }
+            return sb.toString();
+        }
+        private static fn pad2(sb: StringBuilder, v: long) {
+            if (v >= 0 && v < 100) { sb.appendChar(48 + (v / 10) as int); sb.appendChar(48 + (v % 10) as int); return; }
+            sb.appendInt(v);
+        }
+        private fn letter(sb: StringBuilder, c: int) {
+            if (c == 100) { Moment.pad2(sb, self.dy as long); }                                         // d
+            else if (c == 68) { sb.append(Moment.dayNames[self.dayOfWeek()][..3]); }                    // D
+            else if (c == 106) { sb.appendInt(self.dy as long); }                                       // j
+            else if (c == 108) { sb.append(Moment.dayNames[self.dayOfWeek()]); }                        // l
+            else if (c == 78) { sb.appendInt(self.isoWeekday() as long); }                              // N
+            else if (c == 83) { sb.append(Moment.ordinalSuffix(self.dy as long)); }                     // S
+            else if (c == 119) { sb.appendInt(self.dayOfWeek() as long); }                              // w
+            else if (c == 122) { sb.appendInt((self.dayOfYear() - 1) as long); }                        // z
+            else if (c == 87) { Moment.pad2(sb, self.isoWeek() as long); }                              // W
+            else if (c == 70) { sb.append(Moment.monthNames[self.mon - 1]); }                           // F
+            else if (c == 109) { Moment.pad2(sb, self.mon as long); }                                   // m
+            else if (c == 77) { sb.append(Moment.monthNames[self.mon - 1][..3]); }                      // M
+            else if (c == 110) { sb.appendInt(self.mon as long); }                                      // n
+            else if (c == 116) { sb.appendInt(self.daysInMonth() as long); }                            // t
+            else if (c == 76) { sb.append(self.isLeapYear() ? "1" : "0"); }                             // L
+            else if (c == 111) { sb.appendInt(self.isoWeekYear()); }                                    // o
+            else if (c == 89) { Moment.year4(sb, self.yr); }                                            // Y
+            else if (c == 121) { Moment.pad2(sb, Civil.floorMod(self.yr, 100)); }                       // y
+            else if (c == 97) { sb.append(self.hr < 12 ? "am" : "pm"); }                                // a
+            else if (c == 65) { sb.append(self.hr < 12 ? "AM" : "PM"); }                                // A
+            else if (c == 103) { sb.appendInt((self.hr % 12 == 0 ? 12 : self.hr % 12) as long); }       // g
+            else if (c == 71) { sb.appendInt(self.hr as long); }                                        // G
+            else if (c == 104) { Moment.pad2(sb, (self.hr % 12 == 0 ? 12 : self.hr % 12) as long); }    // h
+            else if (c == 72) { Moment.pad2(sb, self.hr as long); }                                     // H
+            else if (c == 105) { Moment.pad2(sb, self.mn as long); }                                    // i
+            else if (c == 115) { Moment.pad2(sb, self.sc as long); }                                    // s
+            else if (c == 117) { Moment.padN(sb, self.us as long, 6); }                                 // u
+            else if (c == 118) { Moment.padN(sb, (self.us / 1000) as long, 3); }                        // v
+            else if (c == 101) { sb.append(self.zone.name); }                                           // e
+            else if (c == 73) { sb.append(self.isDst() ? "1" : "0"); }                                  // I
+            else if (c == 79) { sb.append(TimeZone.offsetText(self.off, false)); }                      // O
+            else if (c == 80) { sb.append(TimeZone.offsetText(self.off, true)); }                       // P
+            else if (c == 112) { sb.append(self.off == 0 ? "Z" : TimeZone.offsetText(self.off, true)); } // p
+            else if (c == 84) { sb.append(self.tzAbbreviation()); }                                     // T
+            else if (c == 90) { sb.appendInt(self.off as long); }                                       // Z
+            else if (c == 99) { sb.append(self.format("Y-m-d\\TH:i:sP")); }                             // c
+            else if (c == 114) { sb.append(self.format("D, d M Y H:i:s O")); }                          // r
+            else if (c == 85) { sb.appendInt(self.ts); }                                                // U
+            else { sb.appendChar(c); }                                                                  // (anything else: as it is)
+        }
+        private static fn padN(sb: StringBuilder, v: long, width: int) {
+            let s = "${v}";
+            for (k in s.length..width) { sb.appendChar(48); }
+            sb.append(s);
+        }
+        private static fn year4(sb: StringBuilder, y: long) {
+            if (y >= 1000 && y <= 9999) { Moment.pad2(sb, y / 100); Moment.pad2(sb, y % 100); return; }
+            if (y < 0) { sb.appendChar(45); Moment.padN(sb, -y, 4); } else { Moment.padN(sb, y, 4); }
+        }
+        // "st", "nd", "rd", "th".
+        static fn ordinalSuffix(n: long) -> string {
+            let t = n % 100;
+            if (t >= 11 && t <= 13) { return "th"; }
+            let u = n % 10;
+            return u == 1 ? "st" : (u == 2 ? "nd" : (u == 3 ? "rd" : "th"));
+        }
+        fn toDateString() -> string { return self.format("Y-m-d"); }
+        fn toTimeString(precision: string = "second") -> string {
+            let u = Units.normalize(precision);
+            if (u == "minute") { return self.format("H:i"); }
+            if (u == "millisecond") { return self.format("H:i:s.v"); }
+            if (u == "microsecond") { return self.format("H:i:s.u"); }
+            return self.format("H:i:s");
+        }
+        fn toDateTimeString() -> string { return self.format("Y-m-d H:i:s"); }
+        fn toDateTimeLocalString() -> string { return self.format("Y-m-d\\TH:i:s"); }
+        fn toFormattedDateString() -> string { return self.format("M j, Y"); }
+        fn toDayDateTimeString() -> string { return self.format("D, M j, Y g:i A"); }
+        fn toIso8601String() -> string { return self.format("c"); }
+        fn toIso8601ZuluString() -> string { return self.utc().format("Y-m-d\\TH:i:s\\Z"); }
+        fn toAtomString() -> string { return self.format("Y-m-d\\TH:i:sP"); }
+        fn toCookieString() -> string { return self.format("l, d-M-Y H:i:s T"); }
+        fn toRfc2822String() -> string { return self.format("D, d M Y H:i:s O"); }
+        fn toRfc3339String(extended: bool = false) -> string { return self.format(extended ? "Y-m-d\\TH:i:s.vP" : "Y-m-d\\TH:i:sP"); }
+        fn toRfc7231String() -> string { return self.utc().format("D, d M Y H:i:s \\G\\M\\T"); }
+        fn toRssString() -> string { return self.format("D, d M Y H:i:s O"); }
+        fn toW3cString() -> string { return self.format("Y-m-d\\TH:i:sP"); }
+        // As Carbon's toJSON: UTC with microseconds, "2026-11-14T06:30:00.000000Z".
+        fn toJson() -> string { return self.utc().format("Y-m-d\\TH:i:s.u\\Z"); }
+        fn jsonValue() -> any { return self.toJson(); }
+        fn toDateTime() -> DateTime { return DateTime.fromUnix(self.ts, self.us); }
+        // The fields by name (year, month, day, dayOfWeek, timezone, …).
+        fn toMap() -> HashMap<string, any> {
+            let m = new HashMap<string, any>();
+            m.put("year", self.yr); m.put("month", self.mon); m.put("day", self.dy);
+            m.put("hour", self.hr); m.put("minute", self.mn); m.put("second", self.sc); m.put("micro", self.us);
+            m.put("dayOfWeek", self.dayOfWeek()); m.put("dayOfYear", self.dayOfYear());
+            m.put("timestamp", self.ts); m.put("timezone", self.zone.name); m.put("formatted", self.toDateTimeString());
+            return m;
+        }
+        // "2026-11-14 09:30:00".
+        fn toString() -> string { return self.toDateTimeString(); }
+    }
+
+    // Unit names: "days", "Day", "d", "hrs" … to "day".
+    class Units {
+        static fn normalize(unit: string) -> string {
+            let u = Str.lower(Str.trim(unit));
+            if (u == "micro" || u == "micros" || u == "microsecond" || u == "microseconds" || u == "us" || u == "µs") { return "microsecond"; }
+            if (u == "milli" || u == "millis" || u == "millisecond" || u == "milliseconds" || u == "ms") { return "millisecond"; }
+            if (u == "s" || u == "sec" || u == "secs" || u == "second" || u == "seconds") { return "second"; }
+            if (u == "m" || u == "min" || u == "mins" || u == "minute" || u == "minutes") { return "minute"; }
+            if (u == "h" || u == "hr" || u == "hrs" || u == "hour" || u == "hours") { return "hour"; }
+            if (u == "d" || u == "day" || u == "days") { return "day"; }
+            if (u == "weekday" || u == "weekdays" || u == "business day" || u == "business days") { return "weekday"; }
+            if (u == "w" || u == "wk" || u == "wks" || u == "week" || u == "weeks") { return "week"; }
+            if (u == "mo" || u == "mos" || u == "month" || u == "months") { return "month"; }
+            if (u == "q" || u == "quarter" || u == "quarters") { return "quarter"; }
+            if (u == "y" || u == "yr" || u == "yrs" || u == "year" || u == "years") { return "year"; }
+            if (u == "decade" || u == "decades") { return "decade"; }
+            if (u == "century" || u == "centuries") { return "century"; }
+            if (u == "millennium" || u == "millennia") { return "millennium"; }
+            return u;
+        }
+        // A unit's length in seconds (up to a week; 0 for calendar units).
+        static fn seconds(unit: string) -> long {
+            if (unit == "second") { return 1; }
+            if (unit == "minute") { return 60; }
+            if (unit == "hour") { return 3600; }
+            if (unit == "day") { return 86400; }
+            if (unit == "week") { return 604800; }
+            return 0;
+        }
+        static fn isUnit(word: string) -> bool {
+            let u = Units.normalize(word);
+            return u == "microsecond" || u == "millisecond" || u == "second" || u == "minute" || u == "hour" || u == "day" || u == "weekday"
+                || u == "week" || u == "month" || u == "quarter" || u == "year" || u == "decade" || u == "century" || u == "millennium";
+        }
+        // 0 = sunday … 6 = saturday (also "mon", "tues"), -1 for other words.
+        static fn weekday(word: string) -> int {
+            let names = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+            let full = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+            for (i in 0..7) {
+                if (word == names[i] || word == full[i] || (word.length >= 3 && Str.startsWith(full[i], word))) { return i; }
+            }
+            return -1;
+        }
+        // 1..12 for "jan", "january", "sept", else 0.
+        static fn month(word: string) -> int {
+            for (i in 0..12) {
+                let full = Str.lower(Moment.monthNames[i]);
+                if (word == full || (word.length >= 3 && Str.startsWith(full, word))) { return i + 1; }
+            }
+            return 0;
+        }
+    }
+
+    // Reads relative English ("next friday 17:00", "3 days ago") against now.
+    class RelativeParser {
+        private words: Array<string>
+        private zone: TimeZone
+        private i: int = 0
+        constructor(text: string, zone: TimeZone) {
+            self.zone = zone;
+            // ("+2days" -> "+2 days", "9am" stays, commas go)
+            let spaced = new StringBuilder();
+            let prevDigit = false;
+            for (k in 0..text.length) {
+                let c = text[k] as int;
+                let digit = c >= 48 && c <= 57;
+                if (c == 44) { spaced.appendChar(32); prevDigit = false; continue; }
+                let letter = c >= 97 && c <= 122;
+                if (letter && prevDigit) {
+                    let rest = text[k..];
+                    if (!Str.startsWith(rest, "am") && !Str.startsWith(rest, "pm") && !Str.startsWith(rest, "st") && !Str.startsWith(rest, "nd") && !Str.startsWith(rest, "rd") && !Str.startsWith(rest, "th")) { spaced.appendChar(32); }
+                }
+                spaced.appendChar(c);
+                prevDigit = digit;
+            }
+            self.words = new Array<string>();
+            for (w in Str.split(spaced.toString(), " ")) { if (w != "") { self.words.push(w); } }
+        }
+        private fn peek(ahead: int = 0) -> string { return self.i + ahead < self.words.size() ? self.words[self.i + ahead] : ""; }
+
+        fn run() -> Moment {
+            let m = Moment.now().inZone(self.zone);
+            let timeSet = false;
+            let firstLast = 0;                       // 1: "first day of", 2: "last day of"
+            while (self.i < self.words.size()) {
+                let w = self.peek();
+                if (w == "now") { self.i += 1; continue; }
+                if (w == "today" || w == "midnight") { m = m.startOfDay(); self.i += 1; continue; }
+                if (w == "tomorrow") { m = m.addDays(1).startOfDay(); self.i += 1; continue; }
+                if (w == "yesterday") { m = m.subDays(1).startOfDay(); self.i += 1; continue; }
+                if (w == "noon" || w == "midday") { m = m.setTime(12); timeSet = true; self.i += 1; continue; }
+                if (w == "at" || w == "of" || w == "and") { self.i += 1; continue; }
+                if ((w == "first" || w == "last") && self.peek(1) == "day" && self.peek(2) == "of") {
+                    firstLast = w == "first" ? 1 : 2;
+                    self.i += 3;
+                    continue;
+                }
+                if (w == "next" || w == "last" || w == "previous" || w == "this") {
+                    let what = self.peek(1);
+                    let wd = Units.weekday(what);
+                    let step = w == "next" ? 1 : (w == "this" ? 0 : -1);
+                    if (wd >= 0) {
+                        if (step > 0) { m = m.next(wd); }
+                        else if (step < 0) { m = m.previous(wd); }
+                        else { m = m.dayOfWeek() == wd ? m.startOfDay() : m.next(wd); }
+                        self.i += 2;
+                        continue;
+                    }
+                    if (Units.isUnit(what)) {
+                        let u = Units.normalize(what);
+                        if (step != 0) { m = m.add(step as long, u); }
+                        if (firstLast == 0 && (u == "week") && step != 0) { m = m.startOfWeek().setTime(m.hour(), m.minute(), m.second()); }
+                        self.i += 2;
+                        continue;
+                    }
+                    let mo = Units.month(what);
+                    if (mo > 0) {
+                        let y = m.year() + (step as long);
+                        m = m.setDate(y, mo, 1);
+                        self.i += 2;
+                        continue;
+                    }
+                    return null;
+                }
+                let wd = Units.weekday(w);
+                if (wd >= 0) {
+                    m = m.dayOfWeek() == wd ? m.startOfDay() : m.next(wd);
+                    self.i += 1;
+                    // ("monday next week": that weekday in next week)
+                    if ((self.peek() == "next" || self.peek() == "last" || self.peek() == "this") && self.peek(1) == "week") {
+                        let shift = self.peek() == "next" ? 1 : (self.peek() == "last" ? -1 : 0);
+                        let base = Moment.now().inZone(self.zone).addWeeks(shift as long).startOfWeek();
+                        m = base.addDays(((wd - base.dayOfWeek() + 7) % 7) as long);
+                        self.i += 2;
+                    }
+                    continue;
+                }
+                let mo = Units.month(w);
+                if (mo > 0) {
+                    // "march 5 2026", "march 2026", "march"
+                    self.i += 1;
+                    let day = 1;
+                    let d = self.dayNumber(self.peek());
+                    if (d > 0) { day = d; self.i += 1; }
+                    let y = m.year();
+                    let yw = self.peek();
+                    if (yw.length == 4 && Str.isDigits(yw)) { y = Integer.parseOr(yw, y); self.i += 1; }
+                    m = Moment.fromLocal(y, mo, day, 0, 0, 0, 0, self.zone);
+                    continue;
+                }
+                if (self.isTime(w)) {
+                    let t = self.readTime();
+                    if (t.size() == 0) { return null; }
+                    m = m.setTime(t[0], t[1], t[2]);
+                    timeSet = true;
+                    continue;
+                }
+                // "5 march 2026", "21st june"
+                let dm = self.dayNumber(w);
+                let mo2 = Units.month(self.peek(1));
+                if (dm > 0 && mo2 > 0) {
+                    self.i += 2;
+                    let y = m.year();
+                    let yw = self.peek();
+                    if (yw.length == 4 && Str.isDigits(yw)) { y = Integer.parseOr(yw, y); self.i += 1; }
+                    m = Moment.fromLocal(y, mo2, dm, 0, 0, 0, 0, self.zone);
+                    continue;
+                }
+                // a number: "+3 days", "3 days ago", "a week ago"
+                let amount = 0 as long;
+                let isNumber = false;
+                if (w == "a" || w == "an") { amount = 1; isNumber = true; }
+                else {
+                    let body = Str.startsWith(w, "+") || Str.startsWith(w, "-") ? w[1..] : w;
+                    if (body != "" && Str.isDigits(body)) { amount = Integer.parseOr(body, 0); if (Str.startsWith(w, "-")) { amount = -amount; } isNumber = true; }
+                }
+                if (isNumber) {
+                    let unit = self.peek(1);
+                    if (Units.isUnit(unit)) {
+                        self.i += 2;
+                        if (self.peek() == "ago") { amount = -amount; self.i += 1; }
+                        else if (self.peek() == "later" || self.peek() == "hence" || self.peek() == "from" ) {
+                            if (self.peek() == "from" && self.peek(1) == "now") { self.i += 1; }
+                            self.i += 1;
+                        }
+                        m = m.add(amount, Units.normalize(unit));
+                        continue;
+                    }
+                }
+                return null;
+            }
+            if (firstLast == 1) { m = m.startOfMonth().setTime(timeSet ? m.hour() : 0, timeSet ? m.minute() : 0, timeSet ? m.second() : 0); }
+            if (firstLast == 2) { m = m.endOfMonth().setTime(timeSet ? m.hour() : 0, timeSet ? m.minute() : 0, timeSet ? m.second() : 0); }
+            return m;
+        }
+        // "5", "5th", "21st" -> 5, 21 (0 when not a day of the month).
+        private fn dayNumber(w: string) -> int {
+            let body = w;
+            for (suffix in ["st", "nd", "rd", "th"]) { if (Str.endsWith(body, suffix)) { body = body[..body.length - 2]; } }
+            if (body == "" || !Str.isDigits(body) || body.length > 2) { return 0; }
+            let d = Integer.parseOr(body, 0) as int;
+            return d >= 1 && d <= 31 ? d : 0;
+        }
+        private fn isTime(w: string) -> bool {
+            if (Str.contains(w, ":")) { return Str.isDigits(Str.replace(Str.replace(Str.replace(w, ":", ""), "am", ""), "pm", "")); }
+            if (Str.endsWith(w, "am") || Str.endsWith(w, "pm")) { return Str.isDigits(w[..w.length - 2]) && w.length > 2; }
+            return Str.isDigits(w) && (self.peek(1) == "am" || self.peek(1) == "pm");
+        }
+        // [h, m, s] from "17:30", "9am", "9:15pm", "9 pm".
+        private fn readTime() -> Array<int> {
+            let w = self.peek();
+            self.i += 1;
+            let ampm = "";
+            if (Str.endsWith(w, "am") || Str.endsWith(w, "pm")) { ampm = w[w.length - 2..]; w = w[..w.length - 2]; }
+            else if (self.peek() == "am" || self.peek() == "pm") { ampm = self.peek(); self.i += 1; }
+            let p = Str.split(w, ":");
+            let h = Integer.parseOr(p[0], -1) as int;
+            let mi = p.size() > 1 ? Integer.parseOr(p[1], -1) as int : 0;
+            let s = p.size() > 2 ? Integer.parseOr(p[2], -1) as int : 0;
+            if (ampm != "") {
+                if (h < 1 || h > 12) { return new Array<int>(); }
+                if (ampm == "am" && h == 12) { h = 0; }
+                if (ampm == "pm" && h != 12) { h += 12; }
+            }
+            if (h < 0 || h > 23 || mi < 0 || mi > 59 || s < 0 || s > 59) { return new Array<int>(); }
+            return [h, mi, s];
+        }
+    }
+
+    // Reads text by a PHP date format (Moment.createFromFormat).
+    class FormatReader {
+        private fmt: string
+        private text: string
+        private zone: TimeZone
+        private p: int = 0
+        constructor(fmt: string, text: string, zone: TimeZone) { self.fmt = fmt; self.text = text; self.zone = zone; }
+
+        private fn num(maxDigits: int) -> long {
+            let start = self.p;
+            let neg = false;
+            if (self.p < self.text.length && self.text[self.p] as int == 45 && maxDigits > 4) { neg = true; self.p += 1; }
+            let v = 0 as long;
+            while (self.p < self.text.length && self.p - start < maxDigits && self.text[self.p] as int >= 48 && self.text[self.p] as int <= 57) {
+                v = v * 10 + (self.text[self.p] as int - 48) as long;
+                self.p += 1;
+            }
+            if (self.p == start || (neg && self.p == start + 1)) { return -1; }
+            return neg ? -v : v;
+        }
+        private fn word() -> string {
+            let start = self.p;
+            while (self.p < self.text.length) {
+                let c = self.text[self.p] as int;
+                if (!((c >= 65 && c <= 90) || (c >= 97 && c <= 122))) { break; }
+                self.p += 1;
+            }
+            return self.text[start..self.p];
+        }
+
+        fn run() -> Moment {
+            let now = Moment.now().inZone(self.zone);
+            let reset = Str.startsWith(self.fmt, "!");
+            let y = reset ? 1970 as long : now.year();
+            let mo = reset ? 1 : now.month();
+            let d = reset ? 1 : now.day();
+            let h = reset ? 0 : now.hour();
+            let mi = reset ? 0 : now.minute();
+            let s = reset ? 0 : now.second();
+            let us = 0;
+            let pm = -1;
+            let offset = -999999;
+            let named: TimeZone = null;
+            let unix = -1 as long;
+            let gotTime = false;
+            let i = reset ? 1 : 0;
+            while (i < self.fmt.length) {
+                let c = self.fmt[i] as int;
+                i += 1;
+                if (c == 92 && i < self.fmt.length) {                                        // \x: a literal
+                    if (self.p >= self.text.length || self.text[self.p] != self.fmt[i]) { return null; }
+                    self.p += 1; i += 1; continue;
+                }
+                if (c == 124) {                                                             // |: reset the rest
+                    if (!gotTime) { h = 0; mi = 0; s = 0; }
+                    continue;
+                }
+                let v = 0 as long;
+                if (c == 100 || c == 106) { v = self.num(2); if (v < 1) { return null; } d = v as int; }
+                else if (c == 109 || c == 110) { v = self.num(2); if (v < 1 || v > 12) { return null; } mo = v as int; }
+                else if (c == 89) { v = self.num(4); if (v < 0) { return null; } y = v; }
+                else if (c == 121) { v = self.num(2); if (v < 0) { return null; } y = v < 70 ? 2000 + v : 1900 + v; }
+                else if (c == 72 || c == 71) { v = self.num(2); if (v < 0 || v > 23) { return null; } h = v as int; gotTime = true; }
+                else if (c == 104 || c == 103) { v = self.num(2); if (v < 1 || v > 12) { return null; } h = v as int; gotTime = true; }
+                else if (c == 105) { v = self.num(2); if (v < 0 || v > 59) { return null; } mi = v as int; gotTime = true; }
+                else if (c == 115) { v = self.num(2); if (v < 0 || v > 59) { return null; } s = v as int; gotTime = true; }
+                else if (c == 117 || c == 118) {
+                    let start = self.p;
+                    v = self.num(c == 117 ? 6 : 3);
+                    if (v < 0) { return null; }
+                    let digitsRead = self.p - start;
+                    let scale = c == 117 ? 6 : 3;
+                    while (digitsRead < scale) { v = v * 10; digitsRead += 1; }
+                    us = (c == 117 ? v : v * 1000) as int;
+                }
+                else if (c == 65 || c == 97) {
+                    let w = Str.lower(self.word());
+                    if (w != "am" && w != "pm") { return null; }
+                    pm = w == "pm" ? 1 : 0;
+                }
+                else if (c == 68 || c == 108) { if (Units.weekday(Str.lower(self.word())) < 0) { return null; } }
+                else if (c == 77 || c == 70) { let mm = Units.month(Str.lower(self.word())); if (mm == 0) { return null; } mo = mm; }
+                else if (c == 85) { unix = self.num(12); if (unix < 0) { return null; } }
+                else if (c == 79 || c == 80 || c == 112 || c == 84 || c == 101) {
+                    let start = self.p;
+                    while (self.p < self.text.length && self.text[self.p] as int != 32) { self.p += 1; }
+                    let z = self.text[start..self.p];
+                    if (z == "Z" || z == "z") { offset = 0; }
+                    else {
+                        offset = TimeZone.parseOffset(z);
+                        if (offset == -999999) { named = TimeZone.tryOf(z); if (named == null) { return null; } }
+                    }
+                }
+                else if (c == 42) { while (self.p < self.text.length && self.text[self.p] as int != 32 && self.text[self.p] as int != 44) { self.p += 1; } }
+                else {
+                    if (self.p >= self.text.length || self.text[self.p] as int != c) { return null; }
+                    self.p += 1;
+                }
+            }
+            if (self.p != self.text.length) { return null; }
+            if (unix >= 0) { return new Moment(unix, 0, self.zone); }
+            if (pm == 1 && h < 12) { h += 12; }
+            if (pm == 0 && h == 12) { h = 0; }
+            if (d > Civil.daysInMonth(y, mo)) { return null; }
+            if (named != null) { return Moment.fromLocal(y, mo, d, h, mi, s, us, named).inZone(self.zone); }
+            if (offset != -999999) {
+                let local = Civil.days(y, mo, d) * 86400 + (h as long) * 3600 + (mi as long) * 60 + (s as long);
+                return new Moment(local - (offset as long), us, self.zone);
+            }
+            return Moment.fromLocal(y, mo, d, h, mi, s, us, self.zone);
+        }
+    }
+}
