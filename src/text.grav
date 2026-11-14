@@ -1,0 +1,581 @@
+// text.grav — Text (Laravel's Str: cases, slugs, plurals, masking, limits,
+// ULIDs …), Stringable (the same, chained), and Number (formatting for people:
+// 1.2K, 3.5 MB, 12th, 45%, KES 1,250.00, "one hundred and five").
+//
+//   Text.plural("person")                    // "people"
+//   Text.slug("Héllo Wörld, 2026!")          // "hello-world-2026"
+//   Text.of("  user profile ").trim().studly().pluralStudly().toString()    // "UserProfiles"
+//   Number.fileSize(3_500_000)               // "3.34 MB"
+import "std"
+import "std/net"
+
+namespace apogee {
+
+    class Text {
+        // ── case ────────────────────────────────────────────────────────────────
+        // The words of an identifier or phrase: "userProfile_id" -> [user, profile, id].
+        static fn words(s: string) -> Array<string> { return Str.identifierWords(s); }
+        static fn camel(s: string) -> string { return Str.toCamelCase(s); }
+        static fn studly(s: string) -> string { return Str.toPascalCase(s); }
+        static fn pascal(s: string) -> string { return Str.toPascalCase(s); }
+        static fn snake(s: string, delimiter: string = "_") -> string { return Str.join(Str.identifierWords(s), delimiter); }
+        static fn kebab(s: string) -> string { return Text.snake(s, "-"); }
+        static fn screamingSnake(s: string) -> string { return Str.upper(Text.snake(s)); }
+        // Every word capitalized: "a tale of two cities" -> "A Tale Of Two Cities".
+        static fn title(s: string) -> string { return Str.titleCase(s); }
+        // An identifier as words for people: "EmailNotificationSent" -> "Email Notification Sent".
+        static fn headline(s: string) -> string {
+            let out = new Array<string>();
+            for (w in Str.identifierWords(s)) { out.push(Text.ucfirst(w)); }
+            return Str.join(out, " ");
+        }
+        static fn ucfirst(s: string) -> string { return s == "" ? s : Str.upper(s[..1]) + s[1..]; }
+        static fn lcfirst(s: string) -> string { return s == "" ? s : Str.lower(s[..1]) + s[1..]; }
+        static fn lower(s: string) -> string { return Str.lower(s); }
+        static fn upper(s: string) -> string { return Str.upper(s); }
+        // Split before capitals: "FooBar" -> [Foo, Bar].
+        static fn ucsplit(s: string) -> Array<string> {
+            let out = new Array<string>();
+            let start = 0;
+            for (i in 1..s.length) {
+                let c = s[i] as int;
+                if (c >= 65 && c <= 90) { out.push(s[start..i]); start = i; }
+            }
+            if (s != "") { out.push(s[start..]); }
+            return out;
+        }
+
+        // ── slugs and ASCII ─────────────────────────────────────────────────────
+        // "Héllo Wörld, 2026!" -> "hello-world-2026" (accents dropped, "@" as "at", "&" as "and").
+        static fn slug(s: string, separator: string = "-") -> string {
+            let t = Str.lower(Text.ascii(s));
+            t = Str.replace(Str.replace(t, "@", " at "), "&", " and ");
+            let sb = new StringBuilder();
+            let pendingSep = false;
+            for (i in 0..t.length) {
+                let c = t[i] as int;
+                let keep = (c >= 97 && c <= 122) || (c >= 48 && c <= 57);
+                if (keep) {
+                    if (pendingSep && sb.length() > 0) { sb.append(separator); }
+                    pendingSep = false;
+                    sb.appendChar(c);
+                } else { pendingSep = true; }
+            }
+            return sb.toString();
+        }
+        // Accented Latin letters as plain ASCII ("Ångström" -> "Angstrom"); other non-ASCII dropped.
+        static fn ascii(s: string) -> string {
+            let plain = true;
+            for (i in 0..s.length) { if (s[i] as int >= 128) { plain = false; break; } }
+            if (plain) { return s; }
+            let t = s;
+            let from: Array<string> = ["à","á","â","ã","ä","å","æ","ç","è","é","ê","ë","ì","í","î","ï","ð","ñ","ò","ó","ô","õ","ö","ø","ù","ú","û","ü","ý","ÿ","þ","ß","ā","ă","ą","ć","č","ď","đ","ē","ė","ę","ě","ğ","ī","į","ı","ķ","ł","ľ","ń","ň","ō","ő","œ","ř","ś","š","ş","ť","ţ","ū","ů","ű","ų","ź","ż","ž",
+                        "À","Á","Â","Ã","Ä","Å","Æ","Ç","È","É","Ê","Ë","Ì","Í","Î","Ï","Ð","Ñ","Ò","Ó","Ô","Õ","Ö","Ø","Ù","Ú","Û","Ü","Ý","Þ","Ā","Ă","Ą","Ć","Č","Ď","Đ","Ē","Ė","Ę","Ě","Ğ","Ī","Į","İ","Ķ","Ł","Ľ","Ń","Ň","Ō","Ő","Œ","Ř","Ś","Š","Ş","Ť","Ţ","Ū","Ů","Ű","Ų","Ź","Ż","Ž","“","”","‘","’","–","—","…","€","£","©","®","™"];
+            let to: Array<string> = ["a","a","a","a","a","a","ae","c","e","e","e","e","i","i","i","i","d","n","o","o","o","o","o","o","u","u","u","u","y","y","th","ss","a","a","a","c","c","d","d","e","e","e","e","g","i","i","i","k","l","l","n","n","o","o","oe","r","s","s","s","t","t","u","u","u","u","z","z","z",
+                      "A","A","A","A","A","A","AE","C","E","E","E","E","I","I","I","I","D","N","O","O","O","O","O","O","U","U","U","U","Y","TH","A","A","A","C","C","D","D","E","E","E","E","G","I","I","I","K","L","L","N","N","O","O","OE","R","S","S","S","T","T","U","U","U","U","Z","Z","Z","\"","\"","'","'","-","-","...","EUR","GBP","(c)","(r)","(tm)"];
+            for (k in 0..from.size()) { if (Str.contains(t, from[k])) { t = Str.replace(t, from[k], to[k]); } }
+            let sb = new StringBuilder();
+            for (i in 0..t.length) { let c = t[i] as int; if (c < 128) { sb.appendChar(c); } }
+            return sb.toString();
+        }
+        static fn isAscii(s: string) -> bool { for (i in 0..s.length) { if (s[i] as int >= 128) { return false; } } return true; }
+
+        // ── plurals ─────────────────────────────────────────────────────────────
+        static uncountable: Array<string> = ["audio", "bison", "cattle", "chassis", "compensation", "coreopsis", "data", "deer", "education", "emoji", "equipment", "evidence", "feedback", "firmware", "fish", "furniture", "gold", "hardware", "information", "jedi", "kin", "knowledge", "love", "luggage", "metadata", "money", "moose", "music", "news", "nutrition", "offspring", "plankton", "pokemon", "police", "rain", "recommended", "related", "rice", "research", "series", "sheep", "sms", "software", "species", "staff", "swine", "traffic", "wheat", "wildlife", "you"]
+        static irregularSingular: Array<string> = ["person", "man", "woman", "child", "tooth", "foot", "mouse", "goose", "ox", "leaf", "life", "knife", "wife", "half", "wolf", "shelf", "thief", "loaf", "calf", "criterion", "phenomenon", "cactus", "focus", "fungus", "nucleus", "radius", "stimulus", "syllabus", "alumnus", "analysis", "crisis", "thesis", "diagnosis", "basis", "axis", "index", "matrix", "vertex", "appendix", "quiz", "genus", "potato", "tomato", "hero", "echo", "veto", "torpedo", "cookie", "movie", "zombie", "die", "passerby", "octopus", "virus", "status", "campus", "bus", "gas", "atlas", "canvas", "alias", "lens", "medium", "curriculum", "bacterium", "datum"]
+        static irregularPlural: Array<string> = ["people", "men", "women", "children", "teeth", "feet", "mice", "geese", "oxen", "leaves", "lives", "knives", "wives", "halves", "wolves", "shelves", "thieves", "loaves", "calves", "criteria", "phenomena", "cacti", "foci", "fungi", "nuclei", "radii", "stimuli", "syllabi", "alumni", "analyses", "crises", "theses", "diagnoses", "bases", "axes", "indices", "matrices", "vertices", "appendices", "quizzes", "genera", "potatoes", "tomatoes", "heroes", "echoes", "vetoes", "torpedoes", "cookies", "movies", "zombies", "dice", "passersby", "octopuses", "viruses", "statuses", "campuses", "buses", "gases", "atlases", "canvases", "aliases", "lenses", "media", "curricula", "bacteria", "data"]
+
+        // The plural (or, with count 1, the word as it is): "person" -> "people",
+        // "category" -> "categories", "box" -> "boxes"; the word's case is kept.
+        static fn plural(word: string, count: long = 2) -> string {
+            if (count == 1 || count == -1 || word == "") { return word; }
+            let lower = Str.lower(word);
+            if (Text.uncountable.contains(Text.lastWord(lower))) { return word; }
+            let head = Text.headOf(lower);
+            let last = Text.lastWord(lower);
+            let i = Text.irregularSingular.indexOf(last);
+            if (i >= 0) { return Text.matchCase(head + Text.irregularPlural[i], word); }
+            if (Text.irregularPlural.contains(last)) { return word; }
+            return Text.matchCase(head + Text.regularPlural(last), word);
+        }
+        private static fn regularPlural(w: string) -> string {
+            if (Str.endsWith(w, "s") || Str.endsWith(w, "x") || Str.endsWith(w, "z") || Str.endsWith(w, "ch") || Str.endsWith(w, "sh")) {
+                return Str.endsWith(w, "z") && !Str.endsWith(w, "zz") && w.length > 2 ? w + "zes" : w + "es";
+            }
+            if (Str.endsWith(w, "y") && w.length > 1 && !Text.isVowel(w[w.length - 2] as int)) { return w[..w.length - 1] + "ies"; }
+            if (Str.endsWith(w, "fe")) { return w[..w.length - 2] + "ves"; }
+            if (Str.endsWith(w, "lf") || Str.endsWith(w, "rf")) { return w[..w.length - 1] + "ves"; }
+            return w + "s";
+        }
+        // The singular: "people" -> "person", "categories" -> "category", "boxes" -> "box".
+        static fn singular(word: string) -> string {
+            if (word == "") { return word; }
+            let lower = Str.lower(word);
+            let head = Text.headOf(lower);
+            let last = Text.lastWord(lower);
+            if (Text.uncountable.contains(last)) { return word; }
+            let i = Text.irregularPlural.indexOf(last);
+            if (i >= 0) { return Text.matchCase(head + Text.irregularSingular[i], word); }
+            if (Text.irregularSingular.contains(last)) { return word; }
+            let w = last;
+            let out = w;
+            if (Str.endsWith(w, "ies") && w.length > 3) { out = w[..w.length - 3] + "y"; }
+            else if (Str.endsWith(w, "ves") && w.length > 3) { out = w[..w.length - 3] + "f"; }
+            else if (Str.endsWith(w, "zzes") || Str.endsWith(w, "sses") || Str.endsWith(w, "shes") || Str.endsWith(w, "ches") || Str.endsWith(w, "xes")) { out = w[..w.length - 2]; }
+            else if (Str.endsWith(w, "zes") && w.length > 3) { out = w[..w.length - 3]; }
+            else if (Str.endsWith(w, "ses") && w.length > 4) { out = w[..w.length - 2]; }
+            else if (Str.endsWith(w, "s") && !Str.endsWith(w, "ss") && !Str.endsWith(w, "us") && !Str.endsWith(w, "is") && w.length > 1) { out = w[..w.length - 1]; }
+            return Text.matchCase(head + out, word);
+        }
+        // The last word of a StudlyCase name in the plural: "UserProfile" -> "UserProfiles".
+        static fn pluralStudly(s: string, count: long = 2) -> string {
+            let parts = Text.ucsplit(s);
+            if (parts.size() == 0) { return s; }
+            let last = parts.pop();
+            return Str.join(parts, "") + Text.plural(last, count);
+        }
+        // "3 items" / "1 item".
+        static fn pluralize(count: long, word: string) -> string { return "${count} " + Text.plural(word, count); }
+        private static fn isVowel(c: int) -> bool { return c == 97 || c == 101 || c == 105 || c == 111 || c == 117; }
+        // (the last word of "blog_post" or "order item", and what is before it)
+        private static fn lastWord(s: string) -> string {
+            let cut = -1;
+            for (i in 0..s.length) { let c = s[i] as int; if (c == 95 || c == 32 || c == 45) { cut = i; } }
+            return cut < 0 ? s : s[cut + 1..];
+        }
+        private static fn headOf(s: string) -> string {
+            let cut = -1;
+            for (i in 0..s.length) { let c = s[i] as int; if (c == 95 || c == 32 || c == 45) { cut = i; } }
+            return cut < 0 ? "" : s[..cut + 1];
+        }
+        // `w` in the case of `like`: UPPER, Capitalized or lower.
+        private static fn matchCase(w: string, like: string) -> string {
+            if (like.length > 1 && Str.upper(like) == like) { return Str.upper(w); }
+            let lastStart = 0;
+            for (i in 0..like.length) { let c = like[i] as int; if (c == 95 || c == 32 || c == 45) { lastStart = i + 1; } }
+            if (lastStart < like.length) {
+                let c = like[lastStart] as int;
+                if (c >= 65 && c <= 90 && lastStart < w.length) { return w[..lastStart] + Str.upper(w[lastStart..lastStart + 1]) + w[lastStart + 1..]; }
+            }
+            return w;
+        }
+
+        // ── cutting ─────────────────────────────────────────────────────────────
+        // At most `limit` characters, then `end` ("Hello wo...").
+        static fn limit(s: string, limit: int, end: string = "...", preserveWords: bool = false) -> string {
+            if (s.length <= limit) { return s; }
+            let cut = Text.utf8Cut(s, limit);
+            if (preserveWords) {
+                let space = Str.lastIndexOf(s[..cut + 1 > s.length ? s.length : cut + 1], " ");
+                if (space > 0) { cut = space; }
+            }
+            return Str.trimEnd(s[..cut]) + end;
+        }
+        // At most `n` words, then `end`.
+        static fn wordsLimit(s: string, n: int, end: string = "...") -> string {
+            let ws = Str.words(s);
+            if (ws.size() <= n) { return s; }
+            return Str.join(ws.slice(0, n), " ") + end;
+        }
+        // (a byte index at or before `n` that does not split a UTF-8 character)
+        private static fn utf8Cut(s: string, n: int) -> int {
+            let i = n;
+            while (i > 0 && i < s.length && (s[i] as int & 192) == 128) { i -= 1; }
+            return i;
+        }
+        // The text around the first `phrase`: excerpt("This is my name", "my", 3) -> "...is my na...".
+        static fn excerpt(s: string, phrase: string, radius: int = 100, omission: string = "...") -> string {
+            let at = phrase == "" ? 0 : Str.indexOf(Str.lower(s), Str.lower(phrase));
+            if (at < 0) { return ""; }
+            let from = at - radius < 0 ? 0 : at - radius;
+            let to = at + phrase.length + radius > s.length ? s.length : at + phrase.length + radius;
+            return (from > 0 ? omission : "") + Str.trim(s[from..to]) + (to < s.length ? omission : "");
+        }
+        // Characters from `index` (negative: from the end), `length` of them (all
+        // the rest when negative), replaced by `ch`: mask("ada@x.io", "*", 3) -> "ada*****".
+        static fn mask(s: string, ch: string, index: int, length: int = -1) -> string {
+            let n = s.length;
+            let from = index < 0 ? (n + index < 0 ? 0 : n + index) : (index > n ? n : index);
+            let to = length < 0 ? n : (from + length > n ? n : from + length);
+            return s[..from] + Str.repeat(ch, to - from) + s[to..];
+        }
+        static fn after(s: string, search: string) -> string { let i = Str.indexOf(s, search); return search == "" || i < 0 ? s : s[i + search.length..]; }
+        static fn afterLast(s: string, search: string) -> string { let i = Str.lastIndexOf(s, search); return search == "" || i < 0 ? s : s[i + search.length..]; }
+        static fn before(s: string, search: string) -> string { let i = Str.indexOf(s, search); return search == "" || i < 0 ? s : s[..i]; }
+        static fn beforeLast(s: string, search: string) -> string { let i = Str.lastIndexOf(s, search); return search == "" || i < 0 ? s : s[..i]; }
+        // The text between the first `from` and the last `to`.
+        static fn between(s: string, from: string, to: string) -> string { return Text.beforeLast(Text.after(s, from), to); }
+        // The text between the first `from` and the next `to`.
+        static fn betweenFirst(s: string, from: string, to: string) -> string { return Text.before(Text.after(s, from), to); }
+        // `s` starting with `prefix` once ("/" + path).
+        static fn start(s: string, prefix: string) -> string {
+            let t = s;
+            while (prefix != "" && Str.startsWith(t, prefix)) { t = t[prefix.length..]; }
+            return prefix + t;
+        }
+        static fn finish(s: string, suffix: string) -> string {
+            let t = s;
+            while (suffix != "" && Str.endsWith(t, suffix)) { t = t[..t.length - suffix.length]; }
+            return t + suffix;
+        }
+        static fn wrap(s: string, before: string, after: string = "") -> string { return before + s + (after == "" ? before : after); }
+        static fn unwrap(s: string, before: string, after: string = "") -> string {
+            let a = after == "" ? before : after;
+            let t = Str.startsWith(s, before) ? s[before.length..] : s;
+            return Str.endsWith(t, a) ? t[..t.length - a.length] : t;
+        }
+        static fn chopStart(s: string, prefix: string) -> string { return Str.startsWith(s, prefix) ? s[prefix.length..] : s; }
+        static fn chopEnd(s: string, suffix: string) -> string { return Str.endsWith(s, suffix) ? s[..s.length - suffix.length] : s; }
+
+        // ── tests ───────────────────────────────────────────────────────────────
+        // A wildcard match: is("admin/*", path); `*` is any text.
+        static fn is(pattern: string, s: string) -> bool {
+            if (pattern == s) { return true; }
+            let parts = Str.split(pattern, "*");
+            if (parts.size() == 1) { return false; }
+            if (!Str.startsWith(s, parts[0])) { return false; }
+            let at = parts[0].length;
+            for (i in 1..parts.size() - 1) {
+                let p = Str.indexFrom(s, parts[i], at);
+                if (p < 0) { return false; }
+                at = p + parts[i].length;
+            }
+            let last = parts[parts.size() - 1];
+            return s.length - at >= last.length && Str.endsWith(s, last);
+        }
+        static fn isAny(patterns: Array<string>, s: string) -> bool { for (p in patterns) { if (Text.is(p, s)) { return true; } } return false; }
+        static fn contains(s: string, needle: string, ignoreCase: bool = false) -> bool { return ignoreCase ? Str.containsIgnoreCase(s, needle) : Str.contains(s, needle); }
+        static fn containsAny(s: string, needles: Array<string>) -> bool { for (n in needles) { if (Str.contains(s, n)) { return true; } } return false; }
+        static fn containsAll(s: string, needles: Array<string>) -> bool { for (n in needles) { if (!Str.contains(s, n)) { return false; } } return true; }
+        static fn startsWithAny(s: string, prefixes: Array<string>) -> bool { for (p in prefixes) { if (Str.startsWith(s, p)) { return true; } } return false; }
+        static fn endsWithAny(s: string, suffixes: Array<string>) -> bool { for (p in suffixes) { if (Str.endsWith(s, p)) { return true; } } return false; }
+        static fn isUuid(s: string) -> bool { return Uuid.isValid(s); }
+        static fn isUlid(s: string) -> bool {
+            if (s.length != 26) { return false; }
+            let alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+            for (i in 0..26) { if (Str.indexOf(alphabet, Str.upper(s[i..i + 1])) < 0) { return false; } }
+            return s[0] as int <= 55;                                     // (a 48-bit time: the first digit is 0-7)
+        }
+        static fn isJson(s: string) -> bool { return Json.tryParse(s) != null; }
+        static fn isUrl(s: string, protocols: Array<string> = ["http", "https"]) -> bool {
+            let colon = Str.indexOf(s, "://");
+            if (colon <= 0 || !protocols.contains(Str.lower(s[..colon]))) { return false; }
+            let rest = s[colon + 3..];
+            let host = Text.before(Text.before(Text.before(rest, "/"), "?"), "#");
+            return host != "" && !Str.contains(host, " ");
+        }
+
+        // ── changing ────────────────────────────────────────────────────────────
+        // Runs of whitespace as one space, trimmed.
+        static fn squish(s: string) -> string { return Str.join(Str.words(s), " "); }
+        static fn replaceFirst(s: string, search: string, replace: string) -> string { return Str.replaceFirst(s, search, replace); }
+        static fn replaceLast(s: string, search: string, replace: string) -> string {
+            let i = Str.lastIndexOf(s, search);
+            return search == "" || i < 0 ? s : s[..i] + replace + s[i + search.length..];
+        }
+        // Each `search` in turn replaced by the next value: replaceArray("?", ["8:30", "9:00"], "between ? and ?").
+        static fn replaceArray(search: string, values: Array<string>, s: string) -> string {
+            let t = s;
+            let at = 0;
+            for (v in values) {
+                let i = Str.indexFrom(t, search, at);
+                if (i < 0) { break; }
+                t = t[..i] + v + t[i + search.length..];
+                at = i + v.length;
+            }
+            return t;
+        }
+        // Several replacements at once (none sees another's output): swap({"Tacos": "Burritos"}, s).
+        static fn swap(map: HashMap<string, string>, s: string) -> string {
+            let keys = map.keys();
+            keys.sortBy(fn(a: string, b: string) -> int { return b.length - a.length; });
+            let sb = new StringBuilder();
+            let i = 0;
+            while (i < s.length) {
+                let hit = false;
+                for (k in keys) {
+                    if (k != "" && i + k.length <= s.length && s[i..i + k.length] == k) { sb.append(map[k]); i += k.length; hit = true; break; }
+                }
+                if (!hit) { sb.append(s[i..i + 1]); i += 1; }
+            }
+            return sb.toString();
+        }
+        static fn remove(s: string, search: string, ignoreCase: bool = false) -> string {
+            if (!ignoreCase) { return Str.replace(s, search, ""); }
+            let lower = Str.lower(search);
+            let sb = new StringBuilder();
+            let i = 0;
+            while (i < s.length) {
+                if (i + search.length <= s.length && Str.lower(s[i..i + search.length]) == lower && search != "") { i += search.length; }
+                else { sb.append(s[i..i + 1]); i += 1; }
+            }
+            return sb.toString();
+        }
+        static fn padBoth(s: string, length: int, pad: string = " ") -> string {
+            let total = length - s.length;
+            if (total <= 0) { return s; }
+            let left = total / 2;
+            return Text.fill(pad, left) + s + Text.fill(pad, total - left);
+        }
+        static fn padLeft(s: string, length: int, pad: string = " ") -> string { return length > s.length ? Text.fill(pad, length - s.length) + s : s; }
+        static fn padRight(s: string, length: int, pad: string = " ") -> string { return length > s.length ? s + Text.fill(pad, length - s.length) : s; }
+        private static fn fill(pad: string, n: int) -> string { let t = Str.repeat(pad, n / (pad.length == 0 ? 1 : pad.length) + 1); return t[..n]; }
+        static fn reverse(s: string) -> string { return Str.reverse(s); }
+        static fn repeat(s: string, n: int) -> string { return Str.repeat(s, n); }
+        static fn substrCount(s: string, needle: string) -> int { return Str.count(s, needle); }
+        static fn wordCount(s: string) -> int { return Str.words(s).size(); }
+        // Lines no longer than `width` (words kept whole), joined by `brk`.
+        static fn wordWrap(s: string, width: int = 75, brk: string = "\n") -> string { return Str.join(Str.wrap(s, width), brk); }
+        // Characters, not bytes (UTF-8).
+        static fn length(s: string) -> int {
+            let n = 0;
+            for (i in 0..s.length) { if ((s[i] as int & 192) != 128) { n += 1; } }
+            return n;
+        }
+
+        // ── making ──────────────────────────────────────────────────────────────
+        // `length` letters and digits from the operating system's random source.
+        static fn random(length: int = 16) -> string {
+            return Text.fromAlphabet("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", length);
+        }
+        // A password: letters, digits and symbols (each kind at least once).
+        static fn password(length: int = 32, symbols: bool = true) -> string {
+            let alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789" + (symbols ? "!@#$%^&*()-_=+[]{};:,.<>?" : "");
+            while (true) {
+                let p = Text.fromAlphabet(alphabet, length);
+                let lower = false; let upper = false; let digit = false; let sym = !symbols;
+                for (i in 0..p.length) {
+                    let c = p[i] as int;
+                    if (c >= 97 && c <= 122) { lower = true; } else if (c >= 65 && c <= 90) { upper = true; } else if (c >= 48 && c <= 57) { digit = true; } else { sym = true; }
+                }
+                if ((lower && upper && digit && sym) || length < 4) { return p; }
+            }
+            return "";
+        }
+        private static fn fromAlphabet(alphabet: string, length: int) -> string {
+            let sb = new StringBuilder();
+            let n = alphabet.length;
+            // (rejection sampling on random bytes: no bias towards the first letters)
+            let limit = 256 - 256 % n;
+            while (sb.length() < length) {
+                let hex = Hash.randomToken(64);
+                let k = 0;
+                while (k + 1 < hex.length && sb.length() < length) {
+                    let b = Text.hexByte(hex[k..k + 2]);
+                    k += 2;
+                    if (b < limit) { sb.appendChar(alphabet[b % n] as int); }
+                }
+            }
+            return sb.toString();
+        }
+        static fn hexByte(h: string) -> int {
+            let v = 0;
+            for (i in 0..h.length) {
+                let c = h[i] as int;
+                v = v * 16 + (c >= 97 ? c - 87 : (c >= 65 ? c - 55 : c - 48));
+            }
+            return v;
+        }
+        static fn uuid() -> string { return Uuid.v4(); }
+        // A UUID that sorts by creation time (version 7: 48 bits of milliseconds first).
+        static fn orderedUuid() -> string {
+            let ms = Time.nowMs();
+            let hex = Text.hex(ms, 12) + Hash.randomToken(10);
+            let variant = "89ab"[Text.hexByte(hex[16..17]) % 4..Text.hexByte(hex[16..17]) % 4 + 1];
+            return hex[..8] + "-" + hex[8..12] + "-7" + hex[13..16] + "-" + variant + hex[17..20] + "-" + hex[20..32];
+        }
+        // A ULID: 26 characters, sortable by time, 80 random bits.
+        static fn ulid() -> string {
+            let alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+            let ms = Time.nowMs();
+            let sb = new StringBuilder();
+            for (i in 9..=0 step -1) { sb.appendChar(alphabet[((ms >> (i * 5)) & 31) as int] as int); }
+            let hex = Hash.randomToken(10);
+            // (80 bits as 16 base-32 digits, 5 bits each)
+            let bits = 0 as long;
+            let have = 0;
+            let k = 0;
+            while (sb.length() < 26) {
+                if (have < 5) { bits = (bits << 8) | (Text.hexByte(hex[k..k + 2]) as long); have += 8; k += 2; }
+                have -= 5;
+                sb.appendChar(alphabet[((bits >> have) & 31) as int] as int);
+            }
+            return sb.toString();
+        }
+        private static fn hex(v: long, digits: int) -> string {
+            let d = "0123456789abcdef";
+            let sb = new StringBuilder();
+            for (i in digits - 1..=0 step -1) { sb.appendChar(d[((v >> (i * 4)) & 15) as int] as int); }
+            return sb.toString();
+        }
+
+        // A fluent wrapper: Text.of(s).trim().snake().toString().
+        static fn of(s: string) -> Stringable { return new Stringable(s); }
+    }
+
+    // Text with Text's helpers as methods, for chaining.
+    class Stringable {
+        public value: string
+        constructor(value: string) { self.value = value; }
+        fn toString() -> string { return self.value; }
+        fn length() -> int { return Text.length(self.value); }
+        fn isEmpty() -> bool { return self.value == ""; }
+        fn isNotEmpty() -> bool { return self.value != ""; }
+        fn trim() -> Stringable { return new Stringable(Str.trim(self.value)); }
+        fn lower() -> Stringable { return new Stringable(Str.lower(self.value)); }
+        fn upper() -> Stringable { return new Stringable(Str.upper(self.value)); }
+        fn title() -> Stringable { return new Stringable(Text.title(self.value)); }
+        fn headline() -> Stringable { return new Stringable(Text.headline(self.value)); }
+        fn camel() -> Stringable { return new Stringable(Text.camel(self.value)); }
+        fn studly() -> Stringable { return new Stringable(Text.studly(self.value)); }
+        fn snake(delimiter: string = "_") -> Stringable { return new Stringable(Text.snake(self.value, delimiter)); }
+        fn kebab() -> Stringable { return new Stringable(Text.kebab(self.value)); }
+        fn slug(separator: string = "-") -> Stringable { return new Stringable(Text.slug(self.value, separator)); }
+        fn ascii() -> Stringable { return new Stringable(Text.ascii(self.value)); }
+        fn plural(count: long = 2) -> Stringable { return new Stringable(Text.plural(self.value, count)); }
+        fn singular() -> Stringable { return new Stringable(Text.singular(self.value)); }
+        fn pluralStudly(count: long = 2) -> Stringable { return new Stringable(Text.pluralStudly(self.value, count)); }
+        fn ucfirst() -> Stringable { return new Stringable(Text.ucfirst(self.value)); }
+        fn lcfirst() -> Stringable { return new Stringable(Text.lcfirst(self.value)); }
+        fn limit(n: int, end: string = "...") -> Stringable { return new Stringable(Text.limit(self.value, n, end)); }
+        fn words(n: int, end: string = "...") -> Stringable { return new Stringable(Text.wordsLimit(self.value, n, end)); }
+        fn mask(ch: string, index: int, length: int = -1) -> Stringable { return new Stringable(Text.mask(self.value, ch, index, length)); }
+        fn after(s: string) -> Stringable { return new Stringable(Text.after(self.value, s)); }
+        fn afterLast(s: string) -> Stringable { return new Stringable(Text.afterLast(self.value, s)); }
+        fn before(s: string) -> Stringable { return new Stringable(Text.before(self.value, s)); }
+        fn beforeLast(s: string) -> Stringable { return new Stringable(Text.beforeLast(self.value, s)); }
+        fn between(a: string, b: string) -> Stringable { return new Stringable(Text.between(self.value, a, b)); }
+        fn start(prefix: string) -> Stringable { return new Stringable(Text.start(self.value, prefix)); }
+        fn finish(suffix: string) -> Stringable { return new Stringable(Text.finish(self.value, suffix)); }
+        fn wrap(before: string, after: string = "") -> Stringable { return new Stringable(Text.wrap(self.value, before, after)); }
+        fn squish() -> Stringable { return new Stringable(Text.squish(self.value)); }
+        fn replace(search: string, replace: string) -> Stringable { return new Stringable(Str.replace(self.value, search, replace)); }
+        fn replaceFirst(search: string, replace: string) -> Stringable { return new Stringable(Text.replaceFirst(self.value, search, replace)); }
+        fn replaceLast(search: string, replace: string) -> Stringable { return new Stringable(Text.replaceLast(self.value, search, replace)); }
+        fn remove(search: string) -> Stringable { return new Stringable(Text.remove(self.value, search)); }
+        fn append(s: string) -> Stringable { return new Stringable(self.value + s); }
+        fn prepend(s: string) -> Stringable { return new Stringable(s + self.value); }
+        fn padLeft(n: int, pad: string = " ") -> Stringable { return new Stringable(Text.padLeft(self.value, n, pad)); }
+        fn padRight(n: int, pad: string = " ") -> Stringable { return new Stringable(Text.padRight(self.value, n, pad)); }
+        fn padBoth(n: int, pad: string = " ") -> Stringable { return new Stringable(Text.padBoth(self.value, n, pad)); }
+        fn reverse() -> Stringable { return new Stringable(Str.reverse(self.value)); }
+        fn repeat(n: int) -> Stringable { return new Stringable(Str.repeat(self.value, n)); }
+        fn when(condition: bool, f: fn(Stringable) -> Stringable) -> Stringable { return condition ? f(self) : self; }
+        fn whenEmpty(f: fn(Stringable) -> Stringable) -> Stringable { return self.value == "" ? f(self) : self; }
+        fn pipe(f: fn(string) -> string) -> Stringable { return new Stringable(f(self.value)); }
+        fn tap(f: fn(Stringable)) -> Stringable { f(self); return self; }
+        fn explode(sep: string) -> Array<string> { return Str.split(self.value, sep); }
+        fn contains(s: string) -> bool { return Str.contains(self.value, s); }
+        fn startsWith(s: string) -> bool { return Str.startsWith(self.value, s); }
+        fn endsWith(s: string) -> bool { return Str.endsWith(self.value, s); }
+        fn is(pattern: string) -> bool { return Text.is(pattern, self.value); }
+        fn exactly(s: string) -> bool { return self.value == s; }
+        fn operator==(o: Stringable) -> bool { return o != null && self.value == o.value; }
+    }
+
+    // Numbers for people.
+    class Number {
+        // 1234567.891 -> "1,234,567.89" (`precision` decimals; `maxPrecision` trims trailing zeros up to it).
+        static fn format(n: double, precision: int = 0, maxPrecision: int = -1, thousands: string = ",", decimal: string = ".") -> string {
+            let digits = maxPrecision >= 0 ? maxPrecision : precision;
+            let neg = n < 0.0;
+            let a = neg ? -n : n;
+            let scale = 1.0;
+            for (k in 0..digits) { scale = scale * 10.0; }
+            let scaled = (a * scale + 0.5) as long;
+            let whole = scaled / (scale as long);
+            let frac = scaled % (scale as long);
+            let w = "${whole}";
+            let sb = new StringBuilder();
+            if (neg && scaled != 0) { sb.append("-"); }
+            for (i in 0..w.length) {
+                if (i > 0 && (w.length - i) % 3 == 0) { sb.append(thousands); }
+                sb.append(w[i..i + 1]);
+            }
+            if (digits > 0) {
+                let f = "${frac + (scale as long)}"[1..];
+                if (maxPrecision >= 0) {
+                    while (f.length > precision && Str.endsWith(f, "0")) { f = f[..f.length - 1]; }
+                }
+                if (f != "") { sb.append(decimal).append(f); }
+            }
+            return sb.toString();
+        }
+        // 45.6 -> "46%" (or "45.6%" with precision 1).
+        static fn percentage(n: double, precision: int = 0, maxPrecision: int = -1) -> string { return Number.format(n, precision, maxPrecision) + "%"; }
+        // 1250 -> "KES 1,250.00" (or "$1,250.00" for USD).
+        static fn currency(amount: double, code: string = "USD", precision: int = 2) -> string {
+            let symbols: HashMap<string, string> = {"USD": "$", "EUR": "€", "GBP": "£", "JPY": "¥", "INR": "₹", "NGN": "₦"};
+            let body = Number.format(amount < 0.0 ? -amount : amount, code == "JPY" ? 0 : precision);
+            let sign = amount < 0.0 ? "-" : "";
+            return symbols.containsKey(code) ? sign + symbols[code] + body : sign + code + " " + body;
+        }
+        // 3500000 -> "3.34 MB" (1024 a step).
+        static fn fileSize(bytes: long, precision: int = 2) -> string {
+            let units: Array<string> = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
+            let v = bytes as double;
+            let i = 0;
+            while ((v >= 1024.0 || v <= -1024.0) && i < units.size() - 1) { v = v / 1024.0; i += 1; }
+            return Number.format(v, 0, i == 0 ? 0 : precision) + " " + units[i];
+        }
+        // 1200 -> "1.2K", 3500000 -> "3.5M".
+        static fn abbreviate(n: double, precision: int = 1) -> string { return Number.scaled(n, precision, ["", "K", "M", "B", "T", "Q"], ""); }
+        // 1200 -> "1.2 thousand".
+        static fn forHumans(n: double, precision: int = 1) -> string { return Number.scaled(n, precision, ["", "thousand", "million", "billion", "trillion", "quadrillion"], " "); }
+        private static fn scaled(n: double, precision: int, units: Array<string>, sep: string) -> string {
+            let v = n < 0.0 ? -n : n;
+            let i = 0;
+            while (v >= 1000.0 && i < units.size() - 1) { v = v / 1000.0; i += 1; }
+            let body = Number.format(v, 0, precision);
+            return (n < 0.0 ? "-" : "") + body + (i == 0 ? "" : sep + units[i]);
+        }
+        // 1 -> "1st", 22 -> "22nd".
+        static fn ordinal(n: long) -> string {
+            let t = n % 100;
+            let suffix = t >= 11 && t <= 13 ? "th" : (n % 10 == 1 ? "st" : (n % 10 == 2 ? "nd" : (n % 10 == 3 ? "rd" : "th")));
+            return "${n}" + suffix;
+        }
+        // 105 -> "one hundred and five".
+        static fn spell(n: long) -> string {
+            if (n == 0) { return "zero"; }
+            if (n < 0) { return "minus " + Number.spell(-n); }
+            let scales = ["", " thousand", " million", " billion", " trillion", " quadrillion", " quintillion"];
+            let groups = new Array<string>();
+            let v = n;
+            let k = 0;
+            while (v > 0) {
+                let g = (v % 1000) as int;
+                if (g > 0) { groups.insert(0, Number.spellHundreds(g, k == 0 && n >= 1000) + scales[k]); }
+                v = v / 1000;
+                k += 1;
+            }
+            return Str.join(groups, " ");
+        }
+        private static fn spellHundreds(n: int, joinWithAnd: bool) -> string {
+            let ones = ["", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"];
+            let tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+            let parts = new Array<string>();
+            let h = n / 100;
+            let r = n % 100;
+            if (h > 0) { parts.push(ones[h] + " hundred"); }
+            if (r > 0) {
+                let low = r < 20 ? ones[r] : tens[r / 10] + (r % 10 > 0 ? "-" + ones[r % 10] : "");
+                parts.push(((h > 0 || joinWithAnd) ? "and " : "") + low);
+            }
+            return Str.join(parts, " ");
+        }
+        // `n` held within [min, max].
+        static fn clamp(n: double, min: double, max: double) -> double { return n < min ? min : (n > max ? max : n); }
+        // [[1, 10], [11, 20], …] up to `to` in steps of `by`.
+        static fn pairs(to: long, by: long, offset: long = 1) -> Array<Array<long>> {
+            let out = new Array<Array<long>>();
+            let start = 0 as long;
+            while (start < to) {
+                let end = start + by > to ? to : start + by;
+                out.push([start + offset, end]);
+                start += by;
+            }
+            return out;
+        }
+    }
+}
