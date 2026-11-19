@@ -428,7 +428,7 @@ namespace apogee {
         fn mode(f: fn(T) -> string) -> Array<string> {
             let counts = self.countBy(f);
             let best = 0;
-            for (k in counts.keys()) { if (counts[k] > best) { best = counts[k]; } }
+            for (n in counts.values()) { if (n > best) { best = n; } }
             let out = new Array<string>();
             for (k in self.groupKeys(f)) { if (counts[k] == best) { out.push(k); } }
             return out;
